@@ -3,6 +3,13 @@ import os
 import sys
 import datetime
 
+# --- Path Fix for pdf_utils ---
+# Ensures pdf_utils can be imported when running from any directory
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.dirname(_script_dir)  # Go up from gui/ to project root
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 # --- PyInstaller Path Fix ---
 # Ensures bundled modules (like pdf_utils) can be imported in standalone executable
 if getattr(sys, 'frozen', False):
@@ -14,7 +21,7 @@ from PyQt5.QtWidgets import (
     QSpinBox, QLineEdit, QDateEdit, QHeaderView, QMessageBox, QAbstractItemView,
     QGraphicsDropShadowEffect, QFrame
 )
-from PyQt5.QtCore import Qt, QDate, QEvent
+from PyQt5.QtCore import Qt, QDate, QEvent, QTimer
 from PyQt5.QtGui import QFont, QColor
 
 # --- Reusing your custom DateEdit ---
@@ -26,6 +33,11 @@ class ClickableDateEdit(QDateEdit):
     def mousePressEvent(self, event):
         super().mousePressEvent(event)
         self.calendarWidget().show()
+
+# --- Custom LineEdit for table cells ---
+class CustomLineEdit(QLineEdit):
+    """Regular LineEdit - Tab handling done by parent table"""
+    pass
 
 class PDFSplitterGUI(QWidget):
     # Premium Dark Theme Colors (Kept identical to your design)
@@ -153,9 +165,26 @@ class PDFSplitterGUI(QWidget):
             QDateEdit {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e293b, stop:1 #0f172a);
                 color: white; padding: 8px 12px; border: 1px solid #475569; border-radius: 10px; font-size: 13px;
+                padding-right: 35px;
             }
             QDateEdit:focus { border: 2px solid #06b6d4; }
-            QDateEdit::drop-down { border: none; width: 30px; }
+            QDateEdit::drop-down { 
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                width: 30px;
+                border: none;
+                background: #06b6d4;
+                border-top-right-radius: 9px;
+                border-bottom-right-radius: 9px;
+            }
+            QDateEdit::down-arrow {
+                image: none;
+                width: 0;
+                height: 0;
+                border-left: 6px solid transparent;
+                border-right: 6px solid transparent;
+                border-top: 8px solid white;
+            }
         """)
         date_row.addWidget(date_label)
         date_row.addWidget(self.date_picker)
@@ -183,19 +212,23 @@ class PDFSplitterGUI(QWidget):
         self.add_row_widgets(0, start_val=1)
 
         # --- Split Button ---
-        split_btn = QPushButton(">>> SPLIT AND RENAME PDFs <<<")
-        split_btn.setMinimumHeight(58)
-        split_btn.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        split_btn.setCursor(Qt.PointingHandCursor)
-        split_btn.setStyleSheet(f"""
+        self.split_btn = QPushButton(">>> SPLIT AND RENAME PDFs <<<")
+        self.split_btn.setMinimumHeight(58)
+        self.split_btn.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        self.split_btn.setCursor(Qt.PointingHandCursor)
+        self.split_btn.setStyleSheet(f"""
             QPushButton {{
                 background: {self.THEME['split_btn_gradient']}; 
                 color: white; font-weight: bold; border-radius: 14px;
             }}
             QPushButton:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #34d399, stop:0.5 #22d3ee, stop:1 #60a5fa); }}
+            QPushButton:focus {{ border: 3px solid #fbbf24; }}
         """)
-        split_btn.clicked.connect(self.split_pdf)
-        layout.addWidget(split_btn)
+        self.split_btn.setFocusPolicy(Qt.StrongFocus)
+        self.split_btn.setAutoDefault(True)
+        self.split_btn.setDefault(True)
+        self.split_btn.clicked.connect(self.split_pdf)
+        layout.addWidget(self.split_btn)
 
         self.setLayout(layout)
 
@@ -214,14 +247,18 @@ class PDFSplitterGUI(QWidget):
         if start_val: start_spin.setValue(start_val)
         start_spin.setStyleSheet(input_style)
         start_spin.setMinimumHeight(38)
+        # Install event filter to handle Tab navigation
+        start_spin.installEventFilter(self)
         
         end_spin = QSpinBox()
         end_spin.setRange(0, 9999)
         end_spin.setSpecialValueText(" ") 
         end_spin.setStyleSheet(input_style)
         end_spin.setMinimumHeight(38)
+        # Install event filter to handle Tab navigation
+        end_spin.installEventFilter(self)
         
-        name_edit = QLineEdit()
+        name_edit = CustomLineEdit()
         name_edit.setPlaceholderText("e.g. Invoice001")
         name_edit.setStyleSheet("""
             QLineEdit {
@@ -231,21 +268,8 @@ class PDFSplitterGUI(QWidget):
             QLineEdit:focus { border: 2px solid #06b6d4; }
         """)
         name_edit.setMinimumHeight(38)
-
-        # Tab logic - creates new row when Tab is pressed in Output File Name
-        def handle_tab():
-            end_val = end_spin.value()
-            if not end_val or (self.total_pages and end_val >= self.total_pages): 
-                return
-            next_start = end_val + 1
-            if self.total_pages and next_start > self.total_pages: 
-                return
-            self.add_row_widgets(self.table.rowCount(), start_val=next_start)
-            self.table.setCurrentCell(self.table.rowCount() - 1, 0)
-        
-        # Install event filter for Tab key detection
+        # Install event filter to catch Tab key
         name_edit.installEventFilter(self)
-        name_edit._tab_handler = handle_tab
         
         remove_btn = QPushButton("DELETE")
         remove_btn.setMinimumSize(80, 38)
@@ -264,28 +288,71 @@ class PDFSplitterGUI(QWidget):
         self.table.setCellWidget(row_pos, 2, name_edit)
         self.table.setCellWidget(row_pos, 3, remove_btn)
 
-
-    def eventFilter(self, obj, event):
-        """Handle Tab key to create new rows."""
-        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Tab:
-            if hasattr(obj, '_tab_handler'):
-                obj._tab_handler()
-                return True
-        return super().eventFilter(obj, event)
-
     def remove_row(self, row):
         if self.table.rowCount() > 1: self.table.removeRow(row)
+    
+    def eventFilter(self, obj, event):
+        """Handle Tab key for natural row-by-row navigation"""
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Tab:
+            # Find which row and column this widget belongs to
+            for row in range(self.table.rowCount()):
+                # Check if Tab pressed on Start Page spinbox (column 0)
+                if self.table.cellWidget(row, 0) == obj:
+                    # Move focus to End Page field in same row
+                    end_spin = self.table.cellWidget(row, 1)
+                    if end_spin:
+                        end_spin.setFocus()
+                        return True
+                
+                # Check if Tab pressed on End Page spinbox (column 1)
+                elif self.table.cellWidget(row, 1) == obj:
+                    # Move focus to Filename field in same row
+                    name_edit = self.table.cellWidget(row, 2)
+                    if name_edit:
+                        name_edit.setFocus()
+                        return True
+                
+                # Check if Tab pressed on Filename field (column 2)
+                elif self.table.cellWidget(row, 2) == obj:
+                    row_count = self.table.rowCount()
+                    
+                    # Last row - special handling
+                    if row == row_count - 1:
+                        end_spin = self.table.cellWidget(row, 1)
+                        if end_spin and end_spin.value() > 0:
+                            end_val = end_spin.value()
+                            # If end page = total pages, focus Split button
+                            if self.total_pages and end_val >= self.total_pages:
+                                # Use QTimer to set focus after event processing
+                                QTimer.singleShot(0, self.split_btn.setFocus)
+                                return True
+                            # Otherwise create new row
+                            next_start = end_val + 1
+                            if not self.total_pages or next_start <= self.total_pages:
+                                self.add_row_widgets(row_count, start_val=next_start)
+                                new_start = self.table.cellWidget(self.table.rowCount() - 1, 0)
+                                if new_start:
+                                    new_start.setFocus()
+                                return True
+                    else:
+                        # Not last row - move to next row's Start Page
+                        next_start_spin = self.table.cellWidget(row + 1, 0)
+                        if next_start_spin:
+                            next_start_spin.setFocus()
+                            return True
+                    break
+        return super().eventFilter(obj, event)
 
     def browse_pdf(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select PDF", "", "PDF Files (*.pdf)")
+        # Default to Downloads folder
+        downloads_folder = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.exists(downloads_folder):
+            downloads_folder = os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(self, "Select PDF", downloads_folder, "PDF Files (*.pdf)")
         if path: self.load_pdf(path)
 
     def load_pdf(self, path):
-        # We try importing pypdf first (modern), then PyPDF2 (legacy)
-        try:
-            from pypdf import PdfReader
-        except ImportError:
-            from PyPDF2 import PdfReader
+        from pypdf import PdfReader
 
         self.pdf_path = path
         self.file_label.setText(os.path.basename(path))
@@ -323,10 +390,28 @@ class PDFSplitterGUI(QWidget):
             success = split_pdf_by_ranges(self.pdf_path, ranges, output_folder)
             if success:
                 QMessageBox.information(self, "Success", f"Split Complete!\nSaved to: {output_folder}")
+                # Reset form for new work
+                self.reset_form()
         except ImportError:
             QMessageBox.critical(self, "Error", "Could not find 'pdf_utils' folder. Please check your installation.")
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
+    
+    def reset_form(self):
+        """Clear all rows and reset form for new PDF"""
+        # Clear table
+        while self.table.rowCount() > 0:
+            self.table.removeRow(0)
+        # Reset file info
+        self.pdf_path = None
+        self.total_pages = 0
+        self.file_label.setText("No PDF selected")
+        self.info_label.setText("Select a PDF to begin")
+        self.info_label.setStyleSheet(f"color: {self.THEME['text_secondary']};")
+        # Reset date to today
+        self.date_picker.setDate(QDate.currentDate())
+        # Add first empty row
+        self.add_row_widgets(0)
 
     # Drag and Drop
     def dragEnterEvent(self, event):

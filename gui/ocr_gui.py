@@ -8,10 +8,10 @@ import sys
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QFileDialog,
     QTextEdit, QMessageBox, QGraphicsDropShadowEffect, QComboBox, QApplication,
-    QProgressBar, QFrame
+    QProgressBar, QFrame, QLineEdit, QScrollArea
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
+from PyQt5.QtGui import QFont, QColor, QTextCharFormat, QTextCursor, QPixmap, QImage
 
 # --- PyInstaller Path Fix ---
 if getattr(sys, 'frozen', False):
@@ -100,6 +100,83 @@ class OCRWorker(QThread):
             self.error.emit(str(e))
 
 
+class ExternalPreviewWindow(QWidget):
+    """Separate window for document preview, useful for dual-monitor setups."""
+    
+    def __init__(self, title="Document Preview"):
+        super().__init__()
+        self.setWindowTitle(title)
+        self.resize(800, 1000)
+        self.setStyleSheet("background: #0a0a1a; color: white;")
+        
+        self.zoom_factor = 1.0
+        self.base_pixmap = None
+        
+        layout = QVBoxLayout(self)
+        
+        # Toolbar
+        toolbar = QHBoxLayout()
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setStyleSheet("color: #06b6d4; font-weight: bold; font-size: 14px;")
+        
+        self.btn_out = QPushButton("−")
+        self.btn_in = QPushButton("+")
+        self.btn_fit = QPushButton("FIT WIDTH")
+        
+        for btn in [self.btn_out, self.btn_in, self.btn_fit]:
+            btn.setFixedSize(80 if btn == self.btn_fit else 40, 35)
+            btn.setStyleSheet("background: #374151; color: white; border-radius: 5px; font-weight: bold;")
+            btn.setCursor(Qt.PointingHandCursor)
+            
+        self.btn_out.clicked.connect(lambda: self.adjust_zoom(0.8))
+        self.btn_in.clicked.connect(lambda: self.adjust_zoom(1.2))
+        self.btn_fit.clicked.connect(self.reset_zoom)
+        
+        toolbar.addWidget(self.btn_out)
+        toolbar.addWidget(self.btn_in)
+        toolbar.addWidget(self.btn_fit)
+        toolbar.addStretch()
+        toolbar.addWidget(self.zoom_label)
+        layout.addLayout(toolbar)
+        
+        # Scroll Area
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setStyleSheet("background: #0f172a; border: 1px solid #475569;")
+        
+        self.label = QLabel("Loading...")
+        self.label.setAlignment(Qt.AlignCenter)
+        self.scroll.setWidget(self.label)
+        layout.addWidget(self.scroll)
+
+    def set_pixmap(self, pixmap, zoom):
+        self.base_pixmap = pixmap
+        self.zoom_factor = zoom
+        self.apply_zoom()
+        
+    def adjust_zoom(self, factor):
+        if self.base_pixmap:
+            self.zoom_factor *= factor
+            self.zoom_factor = max(0.1, min(self.zoom_factor, 5.0))
+            self.apply_zoom()
+            
+    def reset_zoom(self):
+        if self.base_pixmap:
+            width = self.scroll.width() - 30
+            if width > 0:
+                self.zoom_factor = width / self.base_pixmap.width()
+                if self.zoom_factor > 1.0: self.zoom_factor = 1.0
+            self.apply_zoom()
+            
+    def apply_zoom(self):
+        if self.base_pixmap:
+            w = int(self.base_pixmap.width() * self.zoom_factor)
+            h = int(self.base_pixmap.height() * self.zoom_factor)
+            scaled = self.base_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.label.setPixmap(scaled)
+            self.zoom_label.setText(f"{int(self.zoom_factor * 100)}%")
+
+
 class OCRGUI(QWidget):
     """OCR Engine GUI for text extraction from images and PDFs."""
     
@@ -128,6 +205,11 @@ class OCRGUI(QWidget):
         self.setAcceptDrops(True)
         self.current_file = None
         self.ocr_worker = None
+        self.zoom_factor = 1.0
+        self.base_pixmap = None
+        self.preview_image = None
+        self._preview_data = None
+        self.external_window = None
         self.setup_ui()
 
     def setup_ui(self):
@@ -213,6 +295,70 @@ class OCRGUI(QWidget):
         file_row.addWidget(btn_browse)
         
         layout.addLayout(file_row)
+
+        # --- PREVIEW AREA (NEW) ---
+        preview_group = QVBoxLayout()
+        preview_group.setSpacing(5)
+        
+        preview_header = QHBoxLayout()
+        preview_label = QLabel("DOCUMENT PREVIEW:")
+        preview_label.setStyleSheet("color: #a8b4d4; font-size: 11px; font-weight: bold;")
+        preview_header.addWidget(preview_label)
+        
+        preview_header.addStretch()
+        
+        # Zoom Controls
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setStyleSheet("color: #06b6d4; font-size: 11px; font-weight: bold; margin-right: 10px;")
+        preview_header.addWidget(self.zoom_label)
+        
+        self.btn_zoom_out = QPushButton("−")
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_fit = QPushButton("RESET")
+        self.btn_detach = QPushButton("🌐 DETACH")
+        
+        for btn in [self.btn_zoom_out, self.btn_zoom_in, self.btn_zoom_fit, self.btn_detach]:
+            btn.setFixedSize(80 if btn in [self.btn_zoom_fit, self.btn_detach] else 35, 28)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #374151; color: white; border-radius: 4px; font-weight: bold; font-size: 11px;
+                }
+                QPushButton:hover { background: #4b5563; }
+                QPushButton:disabled { color: #555; }
+            """)
+        
+        self.btn_detach.setStyleSheet(self.btn_detach.styleSheet().replace("#374151", "#6366f1"))
+        
+        self.btn_zoom_out.clicked.connect(lambda: self.adjust_zoom(0.8))
+        self.btn_zoom_in.clicked.connect(lambda: self.adjust_zoom(1.2))
+        self.btn_zoom_fit.clicked.connect(self.reset_zoom)
+        self.btn_detach.clicked.connect(self.detach_preview)
+        
+        preview_header.addWidget(self.btn_zoom_out)
+        preview_header.addWidget(self.btn_zoom_in)
+        preview_header.addWidget(self.btn_zoom_fit)
+        preview_header.addWidget(self.btn_detach)
+        
+        preview_group.addLayout(preview_header)
+        
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setMinimumHeight(220)
+        self.scroll_area.setMaximumHeight(350)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea {
+                background: #0f172a; border: 1px solid #475569; border-radius: 8px;
+            }
+        """)
+        
+        self.preview_label = QLabel("No Image Loaded")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setStyleSheet("color: #475569; background: transparent;")
+        self.scroll_area.setWidget(self.preview_label)
+        
+        preview_group.addWidget(self.scroll_area)
+        layout.addLayout(preview_group)
         
         # --- Language & Extract Row ---
         options_row = QHBoxLayout()
@@ -276,13 +422,13 @@ class OCRGUI(QWidget):
         self.status_label.setStyleSheet("color: #06b6d4; font-size: 11px;")
         layout.addWidget(self.status_label)
 
-        # --- Results Text Area ---
-        results_label = QLabel("Extracted Text:")
-        results_label.setStyleSheet("color: #a8b4d4; font-size: 12px; margin-top: 10px;")
-        layout.addWidget(results_label)
+        # --- Search & Results Row (Horizontal) ---
+        results_layout = QHBoxLayout()
+        results_layout.setSpacing(15)
         
+        # Left: Results Text Area
         self.text_area = QTextEdit()
-        self.text_area.setMinimumHeight(250)
+        self.text_area.setMinimumHeight(350)
         self.text_area.setReadOnly(True)
         self.text_area.setPlaceholderText("Extracted text will appear here...\n\nYou can then copy and paste into SAP or other applications.")
         self.text_area.setStyleSheet("""
@@ -292,7 +438,71 @@ class OCRGUI(QWidget):
                 border: 1px solid #475569; border-radius: 12px; padding: 12px;
             }
         """)
-        layout.addWidget(self.text_area)
+        results_layout.addWidget(self.text_area, stretch=7)
+
+        # Right: Search Panel
+        search_panel = QFrame()
+        search_panel.setFixedWidth(260)
+        search_panel.setStyleSheet("""
+            QFrame {
+                background: rgba(30, 41, 59, 0.5);
+                border: 1px solid #475569;
+                border-radius: 12px;
+            }
+            QLabel { background: transparent; border: none; }
+        """)
+        search_vbox = QVBoxLayout(search_panel)
+        search_vbox.setContentsMargins(15, 15, 15, 15)
+        search_vbox.setSpacing(10)
+
+        search_title = QLabel("SEARCH TOOL")
+        search_title.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        search_title.setStyleSheet("color: #06b6d4; border-bottom: 1px solid #475569; padding-bottom: 5px;")
+        search_vbox.addWidget(search_title)
+
+        # Consolidated Search
+        search_vbox.addWidget(QLabel("Search Items (Single or List):"))
+        self.search_input = QTextEdit()
+        self.search_input.setPlaceholderText("Enter one or more terms...\n(one per line for multiple)")
+        self.search_input.setMaximumHeight(180)
+        self.search_input.setStyleSheet("""
+            QTextEdit {
+                background: #0f172a; color: white; border: 1px solid #6366f1;
+                border-radius: 8px; padding: 10px; font-size: 12px;
+            }
+        """)
+        search_vbox.addWidget(self.search_input)
+
+        self.btn_find = QPushButton("🔍 FIND ALL MATCHES")
+        self.btn_find.setMinimumHeight(45)
+        self.btn_find.setStyleSheet("""
+            QPushButton {
+                background: #6366f1; color: white; font-weight: bold; border-radius: 8px;
+            }
+            QPushButton:hover { background: #818cf8; }
+        """)
+        self.btn_find.clicked.connect(self.perform_search)
+        search_vbox.addWidget(self.btn_find)
+
+        self.btn_clear_search = QPushButton("CLEAR HIGHLIGHTS")
+        self.btn_clear_search.setStyleSheet("""
+            QPushButton {
+                background: #374151; color: #9ca3af; font-size: 11px; border-radius: 6px; padding: 5px;
+            }
+            QPushButton:hover { background: #4b5563; color: white; }
+        """)
+        self.btn_clear_search.clicked.connect(self.clear_search_highlights)
+        search_vbox.addWidget(self.btn_clear_search)
+
+        self.search_status = QLabel("")
+        self.search_status.setWordWrap(True)
+        self.search_status.setStyleSheet("color: #22d3ee; font-size: 11px; font-style: italic;")
+        search_vbox.addWidget(self.search_status)
+        
+        search_vbox.addStretch()
+        
+        results_layout.addWidget(search_panel, stretch=3)
+        layout.addLayout(results_layout)
 
         # --- Action Buttons Row ---
         btn_row = QHBoxLayout()
@@ -345,8 +555,13 @@ class OCRGUI(QWidget):
         self.setLayout(layout)
 
     def browse_file(self):
+        # Default to Downloads folder
+        downloads_folder = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.exists(downloads_folder):
+            downloads_folder = os.path.expanduser("~")
+            
         filter_str = "Supported Files (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.gif *.pdf);;All Files (*)"
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select Image or PDF", "", filter_str)
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Image or PDF", downloads_folder, filter_str)
         if file_path:
             self.load_file(file_path)
 
@@ -357,6 +572,98 @@ class OCRGUI(QWidget):
         self.file_label.setToolTip(path)
         self.status_label.setText("")
         self.text_area.clear()
+        self.update_preview(path)
+
+    def update_preview(self, path):
+        """Generate and display a preview of the loaded file."""
+        self.preview_label.setText("Loading preview...")
+        QApplication.processEvents()
+        
+        try:
+            from PIL import Image
+            file_ext = os.path.splitext(path)[1].lower()
+            
+            if file_ext == '.pdf':
+                try:
+                    from pdf2image import convert_from_path
+                    # Just convert the first page for preview
+                    pages = convert_from_path(path, first_page=1, last_page=1, dpi=100)
+                    if pages:
+                        self.preview_image = pages[0]
+                except Exception as e:
+                    self.preview_label.setText(f"PDF Preview Failed: {str(e)}")
+                    return
+            else:
+                try:
+                    self.preview_image = Image.open(path)
+                except Exception as e:
+                    self.preview_label.setText(f"Image Preview Failed: {str(e)}")
+                    return
+            
+            if self.preview_image:
+                # Convert PIL Image to QPixmap
+                if self.preview_image.mode != "RGB":
+                    self.preview_image = self.preview_image.convert("RGB")
+                
+                width, height = self.preview_image.size
+                bytes_per_line = 3 * width
+                # CRITICAL: QImage does not copy the data; we must hold a reference
+                self._preview_data = self.preview_image.tobytes("raw", "RGB")
+                
+                qimage = QImage(self._preview_data, width, height, bytes_per_line, QImage.Format_RGB888)
+                self.base_pixmap = QPixmap.fromImage(qimage)
+                self.reset_zoom()
+                
+                # Sync with external window if open
+                if self.external_window and self.external_window.isVisible():
+                    self.external_window.set_pixmap(self.base_pixmap, self.zoom_factor)
+        
+        except Exception as e:
+            self.preview_label.setText(f"Error: {str(e)}")
+
+    def adjust_zoom(self, factor):
+        if self.base_pixmap:
+            self.zoom_factor *= factor
+            # Limit zoom
+            self.zoom_factor = max(0.1, min(self.zoom_factor, 5.0))
+            self.apply_zoom()
+
+    def reset_zoom(self):
+        if self.base_pixmap:
+            # Calculate factor to fit width (roughly)
+            area_width = self.scroll_area.width() - 30
+            if area_width > 0:
+                self.zoom_factor = area_width / self.base_pixmap.width()
+                # Don't exceed 100% on reset unless it's very small
+                if self.zoom_factor > 1.0: self.zoom_factor = 1.0
+            else:
+                self.zoom_factor = 1.0
+            self.apply_zoom()
+
+    def apply_zoom(self):
+        if self.base_pixmap:
+            new_width = int(self.base_pixmap.width() * self.zoom_factor)
+            new_height = int(self.base_pixmap.height() * self.zoom_factor)
+            scaled = self.base_pixmap.scaled(new_width, new_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.preview_label.setPixmap(scaled)
+            self.zoom_label.setText(f"{int(self.zoom_factor * 100)}%")
+            
+            # Sync with external window if open
+            if self.external_window and self.external_window.isVisible():
+                self.external_window.set_pixmap(self.base_pixmap, self.zoom_factor)
+
+    def detach_preview(self):
+        """Open the preview in a separate window."""
+        if not self.base_pixmap:
+            QMessageBox.warning(self, "Warning", "Please load a document first.")
+            return
+            
+        if not self.external_window:
+            self.external_window = ExternalPreviewWindow(f"Preview - {os.path.basename(self.current_file) if self.current_file else ''}")
+            
+        self.external_window.set_pixmap(self.base_pixmap, self.zoom_factor)
+        self.external_window.show()
+        self.external_window.raise_()
 
     def extract_text(self):
         if not self.current_file:
@@ -394,7 +701,26 @@ class OCRGUI(QWidget):
         self.progress_bar.setVisible(False)
         self.btn_extract.setEnabled(True)
         self.status_label.setText("❌ Error occurred")
-        QMessageBox.critical(self, "OCR Error", f"Failed to extract text:\n{error_msg}")
+        
+        # Friendly suggestion for missing language data
+        if "traineddata" in str(error_msg).lower():
+            missing_lang = "the selected language"
+            if "hin" in str(error_msg).lower(): missing_lang = "Hindi"
+            
+            help_msg = (
+                f"It looks like the <b>{missing_lang}</b> language data is missing for Tesseract.<br><br>"
+                f"Please run this command in your terminal to install it:<br>"
+                f"<code>sudo apt-get install tesseract-ocr-hin</code><br><br>"
+                f"Then restart the app and try again."
+            )
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Critical)
+            msg.setWindowTitle("Language Data Missing")
+            msg.setText(help_msg)
+            msg.setTextFormat(Qt.RichText)
+            msg.exec_()
+        else:
+            QMessageBox.critical(self, "OCR Error", f"Failed to extract text:\n{error_msg}")
 
     def on_ocr_progress(self, message):
         self.status_label.setText(message)
@@ -415,12 +741,17 @@ class OCRGUI(QWidget):
             QMessageBox.warning(self, "Warning", "No text to export.")
             return
         
+        downloads_folder = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.exists(downloads_folder):
+            downloads_folder = os.path.expanduser("~")
+            
         default_name = "extracted_text.txt"
         if self.current_file:
             base = os.path.splitext(os.path.basename(self.current_file))[0]
             default_name = f"{base}_extracted.txt"
         
-        save_path, _ = QFileDialog.getSaveFileName(self, "Save Text File", default_name, "Text Files (*.txt)")
+        initial_path = os.path.join(downloads_folder, default_name)
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save Text File", initial_path, "Text Files (*.txt)")
         if save_path:
             try:
                 with open(save_path, 'w', encoding='utf-8') as f:
@@ -434,6 +765,75 @@ class OCRGUI(QWidget):
         self.file_label.setText("No file selected")
         self.text_area.clear()
         self.status_label.setText("")
+        self.clear_search_highlights()
+
+    def perform_search(self):
+        """Search for matches and highlight them in the text area."""
+        self.clear_search_highlights()
+        
+        # Get search terms from the multi-line edit
+        raw_text = self.search_input.toPlainText().strip()
+        if not raw_text:
+            self.search_status.setText("Enter search terms first.")
+            return
+            
+        search_terms = [line.strip() for line in raw_text.split('\n') if line.strip()]
+            
+        if not search_terms:
+            self.search_status.setText("Enter valid search terms.")
+            return
+
+        # Unique terms
+        search_terms = list(set(search_terms))
+        
+        text = self.text_area.toPlainText()
+        if not text:
+            self.search_status.setText("No text to search.")
+            return
+
+        extra_selections = []
+        total_matches = 0
+        
+        # Color palette for highlights
+        colors = [
+            QColor(255, 255, 0, 100),   # Yellow
+            QColor(0, 255, 255, 100),   # Cyan
+            QColor(255, 0, 255, 100),   # Magenta
+            QColor(0, 255, 0, 100),     # Lime
+            QColor(255, 165, 0, 100),   # Orange
+        ]
+        
+        for i, term in enumerate(search_terms):
+            color = colors[i % len(colors)]
+            
+            cursor = self.text_area.document().find(term)
+            term_matches = 0
+            
+            while not cursor.isNull():
+                selection = QTextEdit.ExtraSelection()
+                selection.format.setBackground(color)
+                # selection.format.setForeground(Qt.black)
+                selection.cursor = cursor
+                extra_selections.append(selection)
+                
+                term_matches += 1
+                total_matches += 1
+                # Move to next match
+                cursor = self.text_area.document().find(term, cursor)
+                
+        self.text_area.setExtraSelections(extra_selections)
+        
+        if total_matches > 0:
+            self.search_status.setText(f"Found {total_matches} matches for {len(search_terms)} items.")
+        else:
+            self.search_status.setText("No matches found.")
+
+    def clear_search_highlights(self):
+        """Reset search inputs and clear highlights."""
+        # self.single_search_input.clear()
+        # self.multi_search_input.clear()
+        self.text_area.setExtraSelections([])
+        self.search_status.setText("")
 
     # Drag and Drop Support
     def dragEnterEvent(self, event):

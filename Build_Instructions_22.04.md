@@ -41,7 +41,9 @@ Run this command to get the necessary tools:
 
 ```bash
 sudo apt update
-sudo apt install -y python3-pip python3-venv python3-dev build-essential libgl1-mesa-dev libxkbcommon-x11-0
+sudo apt install -y python3-pip python3-venv python3-dev build-essential \
+  libgl1-mesa-dev libxkbcommon-x11-0 poppler-utils \
+  tesseract-ocr tesseract-ocr-hin tesseract-ocr-deu
 ```
 
 ### 2. Setup Python Environment
@@ -84,4 +86,4 @@ pyinstaller --noconfirm --onefile --windowed --name "Oi360_Suite" \
 1. **Check the Output**: You will now see a new `dist` folder.
 2. **Test It**: Run `./dist/Oi360_Suite` to make sure it opens.
 3. **Prepare for Fleet**:
-    The file `dist/Oi360_Suite` is your "Gold Master". This is the **only file** you need to copy to the other 50 machines (along with `install.sh` and `logo.png` if you want the desktop shortcuts).
+    The file `dist/Oi360_Suite` is your "Gold Master". This is the **only file** you need to copy to the other 50 machines (along with `install.sh` and `oi360_logo.png` if you want the desktop shortcuts).

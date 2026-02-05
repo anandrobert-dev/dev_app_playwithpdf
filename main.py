@@ -1,13 +1,19 @@
 # File: main.py
 import sys
 import os
+
+# --- ADD PROJECT ROOT TO PYTHON PATH ---
+# This ensures modules like pdf_utils can be imported when running from any directory
+_project_root = os.path.dirname(os.path.abspath(__file__))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, 
     QStackedWidget, QTextEdit, QListWidget, QListWidgetItem, QFileDialog, QMessageBox,
-    QAbstractItemView
+    QAbstractItemView, QScrollArea
 )
 from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QFont, QIcon, QColor, QDragEnterEvent, QDropEvent
+from PyQt5.QtGui import QFont, QIcon, QColor, QDragEnterEvent, QDropEvent, QTransform
 
 # Import the Splitter from your GUI folder
 # NOTE: Ensure your folder has an empty __init__.py file inside 'gui' folder if this fails, 
@@ -30,14 +36,188 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 # --- MERGER LOGIC START ---
-from pypdf import PdfWriter
+from pypdf import PdfWriter, PdfReader
+# --- FLOW LAYOUT (FOR RESPONSIVE THUMBNAILS) ---
+from PyQt5.QtWidgets import QLayout, QSizePolicy
+from PyQt5.QtCore import QPoint, QRect, QSize
+
+class FlowLayout(QLayout):
+    def __init__(self, parent=None, margin=0, spacing=-1):
+        super(FlowLayout, self).__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+        self.itemList = []
+
+    def __del__(self):
+        item = self.takeAt(0)
+        while item:
+            item = self.takeAt(0)
+
+    def addItem(self, item):
+        self.itemList.append(item)
+
+    def count(self):
+        return len(self.itemList)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self.itemList):
+            return self.itemList[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self.itemList):
+            return self.itemList.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        height = self.doLayout(QRect(0, 0, width, 0), True)
+        return height
+
+    def setGeometry(self, rect):
+        super(FlowLayout, self).setGeometry(rect)
+        self.doLayout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self.itemList:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def doLayout(self, rect, testOnly):
+        x = rect.x()
+        y = rect.y()
+        lineHeight = 0
+
+        for item in self.itemList:
+            wid = item.widget()
+            spaceX = self.spacing()
+            spaceY = self.spacing()
+            nextX = x + item.sizeHint().width() + spaceX
+            if nextX - spaceX > rect.right() and lineHeight > 0:
+                x = rect.x()
+                y = y + lineHeight + spaceY
+                nextX = x + item.sizeHint().width() + spaceX
+                lineHeight = 0
+
+            if not testOnly:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+
+            x = nextX
+            lineHeight = max(lineHeight, item.sizeHint().height())
+
+        return y + lineHeight - rect.y()
+
+# --- PAGE ITEM WIDGET ---
+from PyQt5.QtWidgets import QCheckBox, QToolButton
+from PyQt5.QtGui import QPixmap, QImage
+
+class PageItem(QWidget):
+    """Represent an individual PDF page with thumbnail, selection and rotation."""
+    def __init__(self, pixmap, original_file, page_index, zoom=1.0):
+        super().__init__()
+        self.original_file = original_file
+        self.page_index = page_index # 0-indexed
+        self.rotation = 0
+        self.zoom = zoom
+        
+        self.setStyleSheet("""
+            QWidget { background: rgba(30, 41, 59, 0.8); border: 1px solid #475569; border-radius: 8px; }
+            QWidget:hover { border: 1px solid #06b6d4; background: rgba(30, 41, 59, 1); }
+        """)
+        
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(8, 8, 8, 8)
+        self.layout.setSpacing(5)
+        
+        # Header: Checkbox + Page Label
+        header = QHBoxLayout()
+        self.checkbox = QCheckBox()
+        self.checkbox.setChecked(True)
+        self.checkbox.setStyleSheet("QCheckBox::indicator { width: 18px; height: 18px; }")
+        header.addWidget(self.checkbox)
+        
+        self.label = QLabel(f"Page {page_index + 1}")
+        self.label.setStyleSheet("color: #a8b4d4; font-size: 10px; font-weight: bold; border: none; background: transparent;")
+        header.addWidget(self.label, stretch=1)
+        
+        self.layout.addLayout(header)
+        
+        # Thumbnail
+        self.thumb_label = QLabel()
+        self.thumb_label.setAlignment(Qt.AlignCenter)
+        self.thumb_label.setStyleSheet("border: none; background: #0f172a;")
+        self.layout.addWidget(self.thumb_label)
+        
+        # Footer: Rotate Button
+        self.footer = QHBoxLayout()
+        self.btn_rotate = QToolButton()
+        self.btn_rotate.setText("↻")
+        self.btn_rotate.setToolTip("Rotate 90°")
+        self.btn_rotate.setStyleSheet("""
+            QToolButton { background: #334155; color: white; border: none; border-radius: 4px; padding: 2px; }
+            QToolButton:hover { background: #475569; }
+        """)
+        self.btn_rotate.clicked.connect(self.rotate_page)
+        self.footer.addStretch()
+        self.footer.addWidget(self.btn_rotate)
+        self.layout.addLayout(self.footer)
+
+        self.set_thumbnail(pixmap)
+        self.update_zoom(zoom)
+
+    def set_thumbnail(self, pixmap):
+        self.base_pixmap = pixmap
+        self.update_display()
+
+    def update_zoom(self, zoom):
+        self.zoom = zoom
+        w = int(160 * zoom)
+        h = int(220 * zoom)
+        self.setFixedSize(w, h)
+        
+        thumb_w = int(140 * zoom)
+        thumb_h = int(150 * zoom)
+        self.thumb_label.setFixedSize(thumb_w, thumb_h)
+        
+        font_size = max(6, int(10 * zoom))
+        self.label.setStyleSheet(f"color: #a8b4d4; font-size: {font_size}px; font-weight: bold; border: none; background: transparent;")
+        
+        self.update_display()
+
+    def update_display(self):
+        if self.base_pixmap:
+            thumb_w = self.thumb_label.width()
+            thumb_h = self.thumb_label.height()
+            
+            transform = QTransform().rotate(self.rotation)
+            rotated = self.base_pixmap.transformed(transform, Qt.SmoothTransformation)
+            scaled = rotated.scaled(thumb_w, thumb_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.thumb_label.setPixmap(scaled)
+
+    def rotate_page(self):
+        self.rotation = (self.rotation + 90) % 360
+        self.update_display()
 
 class MergerGUI(QWidget):
     def __init__(self, go_back_callback):
         super().__init__()
         self.go_back_callback = go_back_callback
         self.setAcceptDrops(True)
-        self.files_to_merge = [] # List of tuples (filename, fullpath)
+        self.pages = [] # List of PageItem objects
+        self.page_zoom = 1.0
+        self._page_data_cache = [] # Hold references to prevent slanting (Stride issue)
         self.setup_ui()
 
     def setup_ui(self):
@@ -45,15 +225,14 @@ class MergerGUI(QWidget):
         layout.setSpacing(14)
         layout.setContentsMargins(30, 20, 30, 20)
         
-        # --- Drag Drop Hint (Top, visible) ---
-        drag_hint = QLabel("Drag and Drop PDF files to add | Drag items to re-order")
+        # --- Drag Drop Hint ---
+        drag_hint = QLabel("Drag and Drop PDFs to add | Tick pages to keep | Click ↻ to rotate")
         drag_hint.setAlignment(Qt.AlignCenter)
         drag_hint.setStyleSheet("color: #06b6d4; font-size: 12px; font-weight: bold; padding: 8px; background: rgba(6, 182, 212, 0.1); border-radius: 6px;")
         layout.addWidget(drag_hint)
         
-        # --- Header Row: Back Button + Centered Title ---
+        # --- Header ---
         header = QHBoxLayout()
-        
         btn_back = QPushButton("« MAIN MENU")
         btn_back.setFixedSize(140, 42)
         btn_back.setCursor(Qt.PointingHandCursor)
@@ -67,98 +246,131 @@ class MergerGUI(QWidget):
         """)
         btn_back.clicked.connect(self.go_back_callback)
         header.addWidget(btn_back)
-        
         header.addStretch()
         
-        # Title - Electric Blue Fluorescent, Centered (matching Splitter)
         title = QLabel("Oi360 PDF MERGER")
         title.setFont(QFont("Georgia", 38, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("""
-            color: #00d4ff; 
-            background: transparent;
-            letter-spacing: 3px;
-        """)
-        # Add glow effect
+        title.setStyleSheet("color: #00d4ff; background: transparent; letter-spacing: 3px;")
         from PyQt5.QtWidgets import QGraphicsDropShadowEffect
         glow = QGraphicsDropShadowEffect()
         glow.setBlurRadius(30)
         glow.setOffset(0, 0)
-        glow.setColor(QColor(0, 212, 255, 200))  # Electric blue glow
+        glow.setColor(QColor(0, 212, 255, 200))
         title.setGraphicsEffect(glow)
         header.addWidget(title)
-        
         header.addStretch()
         layout.addLayout(header)
 
         # --- Subtitle ---
-        subtitle = QLabel("Powered by GRACE | Premium PDF Management")
+        subtitle = QLabel("Powered by GRACE | Visual Page Management")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("color: #94a3b8; font-style: italic; font-size: 11px;")
         layout.addWidget(subtitle)
 
-        # --- List Widget (Modern Glassmorphism) ---
-        self.list_widget = QListWidget()
-        self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
-        self.list_widget.setMinimumHeight(250)
-        self.list_widget.setStyleSheet("""
-            QListWidget {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(30, 41, 59, 0.9), stop:1 rgba(15, 23, 42, 0.95));
-                color: #e2e8f0; font-size: 14px; border: 1px solid #475569; border-radius: 12px; padding: 12px;
-            }
-            QListWidget::item {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e293b, stop:1 #0f172a);
-                border: 1px solid #475569; border-radius: 8px; padding: 10px; margin: 4px;
-            }
-            QListWidget::item:selected { background: #06b6d4; border: 2px solid #22d3ee; }
-            QListWidget::item:hover { background: #334155; }
+        # --- TOOLBAR: Select All / Deselect All / Clear ---
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(10)
+        
+        btn_sel_all = QPushButton("SELECT ALL")
+        btn_desel_all = QPushButton("DESELECT ALL")
+        
+        for btn in [btn_sel_all, btn_desel_all]:
+            btn.setFixedSize(130, 32)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton { background: #1e293b; color: #94a3b8; border: 1px solid #475569; border-radius: 6px; font-size: 10px; font-weight: bold; }
+                QPushButton:hover { background: #334155; color: white; }
+            """)
+        
+        btn_sel_all.clicked.connect(lambda: self.toggle_all_selection(True))
+        btn_desel_all.clicked.connect(lambda: self.toggle_all_selection(False))
+        
+        toolbar.addWidget(btn_sel_all)
+        toolbar.addWidget(btn_desel_all)
+        toolbar.addStretch()
+        
+        # --- ZOOM CONTROLS ---
+        zoom_box = QHBoxLayout()
+        zoom_box.setSpacing(5)
+        
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setStyleSheet("color: #06b6d4; font-weight: bold; font-size: 13px; margin-right: 5px;")
+        
+        btn_zoom_out = QPushButton("−")
+        btn_zoom_in = QPushButton("+")
+        btn_zoom_reset = QPushButton("RESET")
+        
+        for btn in [btn_zoom_out, btn_zoom_in, btn_zoom_reset]:
+            btn.setFixedSize(60 if btn == btn_zoom_reset else 32, 32)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton { background: #374151; color: white; border-radius: 6px; font-weight: bold; }
+                QPushButton:hover { background: #4b5563; }
+            """)
+            
+        btn_zoom_out.clicked.connect(lambda: self.adjust_page_zoom(0.8))
+        btn_zoom_in.clicked.connect(lambda: self.adjust_page_zoom(1.2))
+        btn_zoom_reset.clicked.connect(self.reset_page_zoom)
+        
+        zoom_box.addWidget(btn_zoom_out)
+        zoom_box.addWidget(btn_zoom_in)
+        zoom_box.addWidget(btn_zoom_reset)
+        zoom_box.addWidget(self.zoom_label)
+        
+        toolbar.addLayout(zoom_box)
+        layout.addLayout(toolbar)
+
+        # --- Grid Area (Scrollable) ---
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setMinimumHeight(350)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea { background: #0f172a; border: 1px solid #475569; border-radius: 12px; }
+            QScrollBar:vertical { width: 10px; background: transparent; }
+            QScrollBar::handle:vertical { background: #334155; border-radius: 5px; }
         """)
-        layout.addWidget(self.list_widget)
+        
+        self.grid_widget = QWidget()
+        self.grid_widget.setStyleSheet("background: transparent; border: none;")
+        self.flow_layout = FlowLayout(self.grid_widget, margin=15, spacing=15)
+        self.scroll_area.setWidget(self.grid_widget)
+        layout.addWidget(self.scroll_area)
 
         # --- Buttons Row ---
         btn_row = QHBoxLayout()
         btn_row.setSpacing(15)
         
-        btn_add = QPushButton("+ ADD FILES")
+        btn_add = QPushButton("+ ADD DOCUMENTS")
         btn_add.setMinimumSize(180, 50)
         btn_add.setFont(QFont("Segoe UI", 12, QFont.Bold))
         btn_add.setCursor(Qt.PointingHandCursor)
         btn_add.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8b5cf6, stop:1 #a78bfa);
-                color: white; font-weight: bold; border-radius: 12px;
-            }
+            QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8b5cf6, stop:1 #a78bfa); color: white; border-radius: 12px; }
             QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #a78bfa, stop:1 #c4b5fd); }
         """)
         btn_add.clicked.connect(self.add_files_dialog)
         
-        btn_clear = QPushButton("CLEAR LIST")
+        btn_clear = QPushButton("CLEAR ALL")
         btn_clear.setMinimumSize(180, 50)
         btn_clear.setFont(QFont("Segoe UI", 12, QFont.Bold))
         btn_clear.setCursor(Qt.PointingHandCursor)
         btn_clear.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ef4444, stop:1 #dc2626);
-                color: white; font-weight: bold; border-radius: 12px;
-            }
+            QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ef4444, stop:1 #dc2626); color: white; border-radius: 12px; }
             QPushButton:hover { background: #f87171; }
         """)
-        btn_clear.clicked.connect(self.list_widget.clear)
+        btn_clear.clicked.connect(self.clear_all_pages)
 
         btn_row.addWidget(btn_add)
         btn_row.addWidget(btn_clear)
         layout.addLayout(btn_row)
 
-        # --- Merge Button (Same style as Split button) ---
-        self.btn_merge = QPushButton(">>> MERGE SELECTED FILES <<<")
+        self.btn_merge = QPushButton(">>> GENERATE FINAL PDF (SELECTED PAGES) <<<")
         self.btn_merge.setMinimumHeight(58)
         self.btn_merge.setFont(QFont("Segoe UI", 14, QFont.Bold))
         self.btn_merge.setCursor(Qt.PointingHandCursor)
         self.btn_merge.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:0.5 #06b6d4, stop:1 #3b82f6);
-                color: white; font-weight: bold; border-radius: 14px; margin-top: 10px;
-            }
+            QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:0.5 #06b6d4, stop:1 #3b82f6); color: white; border-radius: 14px; margin-top: 10px; }
             QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #34d399, stop:0.5 #22d3ee, stop:1 #60a5fa); }
         """)
         self.btn_merge.clicked.connect(self.perform_merge)
@@ -167,50 +379,113 @@ class MergerGUI(QWidget):
         self.setLayout(layout)
 
     def add_files_dialog(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select PDFs", "", "PDF Files (*.pdf)")
+        downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.exists(downloads_path): downloads_path = ""
+        files, _ = QFileDialog.getOpenFileNames(self, "Select PDFs", downloads_path, "PDF Files (*.pdf)")
         if files:
             for f in files:
-                self.add_file_to_list(f)
+                self.add_file_to_grid(f)
 
-    def add_file_to_list(self, path):
-        item = QListWidgetItem(os.path.basename(path))
-        item.setData(Qt.UserRole, path) # Store full path in hidden data
-        self.list_widget.addItem(item)
+    def add_file_to_grid(self, path):
+        try:
+            from pdf2image import convert_from_path
+            # High quality but small enough for grid
+            images = convert_from_path(path, dpi=72)
+            
+            for i, img in enumerate(images):
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                
+                width, height = img.size
+                bytes_per_line = 3 * width
+                # Hold reference to raw data to prevent slanting (Stride/GC issue)
+                raw_data = img.tobytes("raw", "RGB")
+                self._page_data_cache.append(raw_data)
+                
+                qimage = QImage(raw_data, width, height, bytes_per_line, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qimage)
+                
+                page_item = PageItem(pixmap, path, i, zoom=self.page_zoom)
+                self.pages.append(page_item)
+                self.flow_layout.addWidget(page_item)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not load PDF: {str(e)}")
+
+    def adjust_page_zoom(self, factor):
+        self.page_zoom *= factor
+        self.page_zoom = max(0.4, min(self.page_zoom, 2.5))
+        self.zoom_label.setText(f"{int(self.page_zoom * 100)}%")
+        for p in self.pages:
+            p.update_zoom(self.page_zoom)
+        # Update layout to reflect size changes
+        self.flow_layout.update()
+
+    def reset_page_zoom(self):
+        self.page_zoom = 1.0
+        self.zoom_label.setText("100%")
+        for p in self.pages:
+            p.update_zoom(1.0)
+        self.flow_layout.update()
+
+    def toggle_all_selection(self, status):
+        for p in self.pages:
+            p.checkbox.setChecked(status)
+
+    def clear_all_pages(self):
+        self.pages = []
+        self._page_data_cache = []
+        # Clear flow layout
+        while self.flow_layout.count():
+            item = self.flow_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
     def perform_merge(self):
-        count = self.list_widget.count()
-        if count < 2:
-            QMessageBox.warning(self, "Warning", "Please add at least 2 PDF files to merge.")
+        selected_pages = [p for p in self.pages if p.checkbox.isChecked()]
+        if not selected_pages:
+            QMessageBox.warning(self, "Warning", "Please select at least one page to merge.")
             return
 
-        # Ask where to save
-        save_path, _ = QFileDialog.getSaveFileName(self, "Save Merged PDF", "Merged_Invoice.pdf", "PDF Files (*.pdf)")
+        downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+        default_save_path = os.path.join(downloads_path, "Merged_Document.pdf")
+        
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save Combined PDF", default_save_path, "PDF Files (*.pdf)")
         if not save_path: return
 
         try:
-            merger = PdfWriter()
-            for i in range(count):
-                item = self.list_widget.item(i)
-                full_path = item.data(Qt.UserRole)
-                merger.append(full_path)
+            writer = PdfWriter()
+            # Cache readers for performance if multiple pages from same file
+            readers = {}
             
-            merger.write(save_path)
-            merger.close()
+            for p in selected_pages:
+                if p.original_file not in readers:
+                    readers[p.original_file] = PdfReader(p.original_file)
+                
+                reader = readers[p.original_file]
+                page_obj = reader.pages[p.page_index]
+                
+                if p.rotation != 0:
+                    page_obj.rotate(p.rotation)
+                
+                writer.add_page(page_obj)
             
-            QMessageBox.information(self, "Success", f"Files Merged Successfully!\nLocation: {save_path}")
-            self.list_widget.clear()
+            with open(save_path, "wb") as f:
+                writer.write(f)
+            
+            QMessageBox.information(self, "Success", f"PDF Generated successfully with {len(selected_pages)} pages!")
+            self.clear_all_pages()
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Merge failed: {str(e)}")
 
-    # Drag and Drop Support
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls(): event.accept()
     
     def dropEvent(self, event: QDropEvent):
         for url in event.mimeData().urls():
             if url.toLocalFile().lower().endswith('.pdf'):
-                self.add_file_to_list(url.toLocalFile())
+                self.add_file_to_grid(url.toLocalFile())
 # --- MERGER LOGIC END ---
 
 class WelcomeScreen(QWidget):

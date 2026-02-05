@@ -302,7 +302,10 @@ class ImageSplitterGUI(QWidget):
             self.table.removeRow(row)
 
     def browse_tiff(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select TIFF File", "", "TIFF Files (*.tif *.tiff)")
+        downloads_folder = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.exists(downloads_folder):
+            downloads_folder = os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(self, "Select TIFF File", downloads_folder, "TIFF Files (*.tif *.tiff)")
         if path: 
             self.load_tiff(path)
 

@@ -4,10 +4,176 @@ import sys
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QFileDialog,
     QListWidget, QListWidgetItem, QMessageBox, QAbstractItemView,
-    QGraphicsDropShadowEffect
+    QGraphicsDropShadowEffect, QLayout, QSizePolicy, QScrollArea, QCheckBox, QToolButton
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QColor
+from PyQt5.QtCore import Qt, QPoint, QRect, QSize
+from PyQt5.QtGui import QFont, QColor, QPixmap, QImage, QTransform
+
+# --- FLOW LAYOUT (FOR RESPONSIVE THUMBNAILS) ---
+class FlowLayout(QLayout):
+    def __init__(self, parent=None, margin=0, spacing=-1):
+        super(FlowLayout, self).__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+        self.itemList = []
+
+    def __del__(self):
+        item = self.takeAt(0)
+        while item:
+            item = self.takeAt(0)
+
+    def addItem(self, item):
+        self.itemList.append(item)
+
+    def count(self):
+        return len(self.itemList)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self.itemList):
+            return self.itemList[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self.itemList):
+            return self.itemList.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        height = self.doLayout(QRect(0, 0, width, 0), True)
+        return height
+
+    def setGeometry(self, rect):
+        super(FlowLayout, self).setGeometry(rect)
+        self.doLayout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self.itemList:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def doLayout(self, rect, testOnly):
+        x = rect.x()
+        y = rect.y()
+        lineHeight = 0
+
+        for item in self.itemList:
+            wid = item.widget()
+            spaceX = self.spacing()
+            spaceY = self.spacing()
+            nextX = x + item.sizeHint().width() + spaceX
+            if nextX - spaceX > rect.right() and lineHeight > 0:
+                x = rect.x()
+                y = y + lineHeight + spaceY
+                nextX = x + item.sizeHint().width() + spaceX
+                lineHeight = 0
+
+            if not testOnly:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+
+            x = nextX
+            lineHeight = max(lineHeight, item.sizeHint().height())
+
+        return y + lineHeight - rect.y()
+
+# --- IMAGE PAGE ITEM WIDGET ---
+class ImagePageItem(QWidget):
+    """Represent an individual image/page with thumbnail, selection and rotation."""
+    def __init__(self, pixmap, original_file, page_index=0, zoom=1.0):
+        super().__init__()
+        self.original_file = original_file
+        self.page_index = page_index
+        self.rotation = 0
+        self.zoom = zoom
+        self.base_pixmap = pixmap
+        
+        self.setStyleSheet("""
+            QWidget { background: rgba(30, 41, 59, 0.8); border: 1px solid #475569; border-radius: 8px; }
+            QWidget:hover { border: 1px solid #06b6d4; background: rgba(30, 41, 59, 1); }
+        """)
+        
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(8, 8, 8, 8)
+        self.layout.setSpacing(5)
+        
+        # Header: Checkbox + Label
+        header = QHBoxLayout()
+        self.checkbox = QCheckBox()
+        self.checkbox.setChecked(True)
+        self.checkbox.setStyleSheet("QCheckBox::indicator { width: 18px; height: 18px; }")
+        header.addWidget(self.checkbox)
+        
+        name = os.path.basename(original_file)
+        if page_index > 0:
+            name += f" (P{page_index + 1})"
+        self.label = QLabel(name)
+        self.label.setStyleSheet("color: #a8b4d4; font-size: 10px; font-weight: bold; border: none; background: transparent;")
+        header.addWidget(self.label, stretch=1)
+        
+        self.layout.addLayout(header)
+        
+        # Thumbnail
+        self.thumb_label = QLabel()
+        self.thumb_label.setAlignment(Qt.AlignCenter)
+        self.thumb_label.setStyleSheet("border: none; background: #0f172a;")
+        self.layout.addWidget(self.thumb_label)
+        
+        # Footer: Rotate Button
+        self.footer = QHBoxLayout()
+        self.btn_rotate = QToolButton()
+        self.btn_rotate.setText("↻")
+        self.btn_rotate.setToolTip("Rotate 90°")
+        self.btn_rotate.setStyleSheet("""
+            QToolButton { background: #334155; color: white; border: none; border-radius: 4px; padding: 2px; }
+            QToolButton:hover { background: #475569; }
+        """)
+        self.btn_rotate.clicked.connect(self.rotate_page)
+        self.footer.addStretch()
+        self.footer.addWidget(self.btn_rotate)
+        self.layout.addLayout(self.footer)
+
+        self.update_zoom(zoom)
+
+    def update_zoom(self, zoom):
+        self.zoom = zoom
+        w = int(160 * zoom)
+        h = int(220 * zoom)
+        self.setFixedSize(w, h)
+        
+        thumb_w = int(140 * zoom)
+        thumb_h = int(150 * zoom)
+        self.thumb_label.setFixedSize(thumb_w, thumb_h)
+        
+        font_size = max(6, int(10 * zoom))
+        self.label.setStyleSheet(f"color: #a8b4d4; font-size: {font_size}px; font-weight: bold; border: none; background: transparent;")
+        
+        self.update_display()
+
+    def update_display(self):
+        if self.base_pixmap:
+            thumb_w = self.thumb_label.width()
+            thumb_h = self.thumb_label.height()
+            
+            transform = QTransform().rotate(self.rotation)
+            rotated = self.base_pixmap.transformed(transform, Qt.SmoothTransformation)
+            scaled = rotated.scaled(thumb_w, thumb_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.thumb_label.setPixmap(scaled)
+
+    def rotate_page(self):
+        self.rotation = (self.rotation + 90) % 360
+        self.update_display()
 
 # --- PyInstaller Path Fix ---
 if getattr(sys, 'frozen', False):
@@ -24,6 +190,9 @@ class ImageMergerGUI(QWidget):
         super().__init__()
         self.go_back_callback = go_back_callback
         self.setAcceptDrops(True)
+        self.pages = [] # List of ImagePageItem objects
+        self.page_zoom = 1.0
+        self._page_data_cache = [] # Hold references to raw data
         self.setup_ui()
 
     def setup_ui(self):
@@ -32,7 +201,7 @@ class ImageMergerGUI(QWidget):
         layout.setContentsMargins(30, 20, 30, 20)
         
         # --- Drag Drop Hint ---
-        drag_hint = QLabel("Drag and Drop image files to add | Drag items to re-order")
+        drag_hint = QLabel("Drag and Drop image files to add | Tick items to keep | Click ↻ to rotate")
         drag_hint.setAlignment(Qt.AlignCenter)
         drag_hint.setStyleSheet("color: #06b6d4; font-size: 12px; font-weight: bold; padding: 8px; background: rgba(6, 182, 212, 0.1); border-radius: 6px;")
         layout.addWidget(drag_hint)
@@ -73,28 +242,79 @@ class ImageMergerGUI(QWidget):
         layout.addLayout(header)
 
         # --- Subtitle ---
-        subtitle = QLabel("Merge images into PDF | Supports TIF, PNG, JPG")
+        subtitle = QLabel("Merge images into PDF | Visual Page Management")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("color: #94a3b8; font-style: italic; font-size: 11px;")
         layout.addWidget(subtitle)
 
-        # --- List Widget ---
-        self.list_widget = QListWidget()
-        self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
-        self.list_widget.setMinimumHeight(250)
-        self.list_widget.setStyleSheet("""
-            QListWidget {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(30, 41, 59, 0.9), stop:1 rgba(15, 23, 42, 0.95));
-                color: #e2e8f0; font-size: 14px; border: 1px solid #475569; border-radius: 12px; padding: 12px;
-            }
-            QListWidget::item {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1e293b, stop:1 #0f172a);
-                border: 1px solid #475569; border-radius: 8px; padding: 10px; margin: 4px;
-            }
-            QListWidget::item:selected { background: #06b6d4; border: 2px solid #22d3ee; }
-            QListWidget::item:hover { background: #334155; }
+        # --- TOOLBAR: Select All / Deselect All / Zoom ---
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(10)
+        
+        btn_sel_all = QPushButton("SELECT ALL")
+        btn_desel_all = QPushButton("DESELECT ALL")
+        
+        for btn in [btn_sel_all, btn_desel_all]:
+            btn.setFixedSize(130, 32)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton { background: #1e293b; color: #94a3b8; border: 1px solid #475569; border-radius: 6px; font-size: 10px; font-weight: bold; }
+                QPushButton:hover { background: #334155; color: white; }
+            """)
+        
+        btn_sel_all.clicked.connect(lambda: self.toggle_all_selection(True))
+        btn_desel_all.clicked.connect(lambda: self.toggle_all_selection(False))
+        
+        toolbar.addWidget(btn_sel_all)
+        toolbar.addWidget(btn_desel_all)
+        toolbar.addStretch()
+        
+        # --- ZOOM CONTROLS ---
+        zoom_box = QHBoxLayout()
+        zoom_box.setSpacing(5)
+        
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setStyleSheet("color: #06b6d4; font-weight: bold; font-size: 13px; margin-right: 5px;")
+        
+        btn_zoom_out = QPushButton("−")
+        btn_zoom_in = QPushButton("+")
+        btn_zoom_reset = QPushButton("RESET")
+        
+        for btn in [btn_zoom_out, btn_zoom_in, btn_zoom_reset]:
+            btn.setFixedSize(60 if btn == btn_zoom_reset else 32, 32)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton { background: #374151; color: white; border-radius: 6px; font-weight: bold; }
+                QPushButton:hover { background: #4b5563; }
+            """)
+            
+        btn_zoom_out.clicked.connect(lambda: self.adjust_page_zoom(0.8))
+        btn_zoom_in.clicked.connect(lambda: self.adjust_page_zoom(1.2))
+        btn_zoom_reset.clicked.connect(self.reset_page_zoom)
+        
+        zoom_box.addWidget(btn_zoom_out)
+        zoom_box.addWidget(btn_zoom_in)
+        zoom_box.addWidget(btn_zoom_reset)
+        zoom_box.addWidget(self.zoom_label)
+        
+        toolbar.addLayout(zoom_box)
+        layout.addLayout(toolbar)
+
+        # --- Grid Area (Scrollable) ---
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setMinimumHeight(350)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea { background: #0f172a; border: 1px solid #475569; border-radius: 12px; }
+            QScrollBar:vertical { width: 10px; background: transparent; }
+            QScrollBar::handle:vertical { background: #334155; border-radius: 5px; }
         """)
-        layout.addWidget(self.list_widget)
+        
+        self.grid_widget = QWidget()
+        self.grid_widget.setStyleSheet("background: transparent; border: none;")
+        self.flow_layout = FlowLayout(self.grid_widget, margin=15, spacing=15)
+        self.scroll_area.setWidget(self.grid_widget)
+        layout.addWidget(self.scroll_area)
 
         # --- Buttons Row ---
         btn_row = QHBoxLayout()
@@ -124,7 +344,7 @@ class ImageMergerGUI(QWidget):
             }
             QPushButton:hover { background: #f87171; }
         """)
-        btn_clear.clicked.connect(self.list_widget.clear)
+        btn_clear.clicked.connect(self.clear_all_pages)
 
         btn_row.addWidget(btn_add)
         btn_row.addWidget(btn_clear)
@@ -148,65 +368,120 @@ class ImageMergerGUI(QWidget):
         self.setLayout(layout)
 
     def add_files_dialog(self):
+        downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.exists(downloads_path): downloads_path = ""
         filter_str = "Image Files (*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.gif)"
-        files, _ = QFileDialog.getOpenFileNames(self, "Select Images", "", filter_str)
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Images", downloads_path, filter_str)
         if files:
             for f in files:
-                self.add_file_to_list(f)
+                self.add_file_to_grid(f)
 
-    def add_file_to_list(self, path):
-        item = QListWidgetItem(os.path.basename(path))
-        item.setData(Qt.UserRole, path)
-        self.list_widget.addItem(item)
+    def add_file_to_grid(self, path):
+        try:
+            from PIL import Image
+            img = Image.open(path)
+            
+            # Handle multi-page TIFF
+            pages = []
+            try:
+                while True:
+                    pages.append(img.copy())
+                    img.seek(img.tell() + 1)
+            except EOFError:
+                pass
+            
+            for i, page_img in enumerate(pages):
+                if page_img.mode != "RGB":
+                    page_img = page_img.convert("RGB")
+                
+                width, height = page_img.size
+                # Convert PIL image to QImage
+                raw_data = page_img.tobytes("raw", "RGB")
+                self._page_data_cache.append(raw_data)
+                
+                qimage = QImage(raw_data, width, height, 3 * width, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qimage)
+                
+                page_item = ImagePageItem(pixmap, path, i, zoom=self.page_zoom)
+                self.pages.append(page_item)
+                self.flow_layout.addWidget(page_item)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not load image: {str(e)}")
+
+    def adjust_page_zoom(self, factor):
+        self.page_zoom *= factor
+        self.page_zoom = max(0.4, min(self.page_zoom, 2.5))
+        self.zoom_label.setText(f"{int(self.page_zoom * 100)}%")
+        for p in self.pages:
+            p.update_zoom(self.page_zoom)
+        self.flow_layout.update()
+
+    def reset_page_zoom(self):
+        self.page_zoom = 1.0
+        self.zoom_label.setText("100%")
+        for p in self.pages:
+            p.update_zoom(1.0)
+        self.flow_layout.update()
+
+    def toggle_all_selection(self, status):
+        for p in self.pages:
+            p.checkbox.setChecked(status)
+
+    def clear_all_pages(self):
+        self.pages = []
+        self._page_data_cache = []
+        while self.flow_layout.count():
+            item = self.flow_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
     def perform_merge(self):
-        count = self.list_widget.count()
-        if count < 2:
-            QMessageBox.warning(self, "Warning", "Please add at least 2 images to merge.")
+        selected_pages = [p for p in self.pages if p.checkbox.isChecked()]
+        if not selected_pages:
+            QMessageBox.warning(self, "Warning", "Please select at least one page to merge.")
             return
 
-        save_path, _ = QFileDialog.getSaveFileName(self, "Save Merged PDF", "merged_images.pdf", "PDF Files (*.pdf)")
+        downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
+        default_save_path = os.path.join(downloads_path, "merged_images.pdf")
+        
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save Merged PDF", default_save_path, "PDF Files (*.pdf)")
         if not save_path:
             return
 
         try:
             import img2pdf
             from PIL import Image
+            import io
             
-            image_paths = []
-            for i in range(count):
-                item = self.list_widget.item(i)
-                image_paths.append(item.data(Qt.UserRole))
+            processed_images = [] # Bytes of images to merge
             
-            # Convert images to RGB if needed (for RGBA/P mode images)
-            converted_paths = []
-            temp_files = []
-            
-            for img_path in image_paths:
-                img = Image.open(img_path)
-                if img.mode in ('RGBA', 'P', 'LA'):
-                    rgb_img = img.convert('RGB')
-                    temp_path = img_path + '_temp.jpg'
-                    rgb_img.save(temp_path, 'JPEG')
-                    converted_paths.append(temp_path)
-                    temp_files.append(temp_path)
-                else:
-                    converted_paths.append(img_path)
+            for p in selected_pages:
+                img = Image.open(p.original_file)
+                # If multi-page TIFF, seek to correct page
+                if p.page_index > 0:
+                    img.seek(p.page_index)
+                
+                # Apply rotation
+                if p.rotation != 0:
+                    img = img.rotate(-p.rotation, expand=True) # Pillow rotates CCW, UI rotates CW
+                
+                # Convert to RGB (required for JPEG/PDF)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Save to buffer
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='JPEG')
+                processed_images.append(img_byte_arr.getvalue())
             
             # Create PDF
             with open(save_path, "wb") as f:
-                f.write(img2pdf.convert(converted_paths))
+                f.write(img2pdf.convert(processed_images))
             
-            # Cleanup temp files
-            for temp in temp_files:
-                if os.path.exists(temp):
-                    os.remove(temp)
+            QMessageBox.information(self, "Success", f"Images merged to PDF successfully!\nLocation: {save_path}")
+            self.clear_all_pages()
             
-            QMessageBox.information(self, "Success", f"Images merged to PDF!\nLocation: {save_path}")
-            self.list_widget.clear()
-            
-        except ImportError:
-            QMessageBox.critical(self, "Error", "Required library 'img2pdf' or 'Pillow' not found.\nPlease install: pip install img2pdf Pillow")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Merge failed: {str(e)}")
 
@@ -217,6 +492,6 @@ class ImageMergerGUI(QWidget):
     
     def dropEvent(self, event):
         for url in event.mimeData().urls():
-            path = url.toLocalFile().lower()
-            if any(path.endswith(ext) for ext in self.SUPPORTED_FORMATS):
-                self.add_file_to_list(url.toLocalFile())
+            path = url.toLocalFile()
+            if any(path.lower().endswith(ext) for ext in self.SUPPORTED_FORMATS):
+                self.add_file_to_grid(path)

@@ -1,4 +1,4 @@
-from PyPDF2 import PdfReader, PdfWriter
+from pypdf import PdfReader, PdfWriter
 import os
 
 def split_pdf_by_ranges(input_pdf, ranges, output_dir):

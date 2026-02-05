@@ -3,7 +3,7 @@
 # Run this from the dist folder after building with PyInstaller
 
 APP_NAME="Oi360_Suite"
-ICON_NAME="logo.png"
+ICON_NAME="oi360_logo.png"
 DESKTOP_NAME="oi360-pdf-suite"
 
 # Get the directory where this script is located
