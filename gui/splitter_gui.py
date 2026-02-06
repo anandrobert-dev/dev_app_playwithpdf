@@ -19,7 +19,7 @@ if getattr(sys, 'frozen', False):
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QFileDialog, QTableWidget,
     QSpinBox, QLineEdit, QDateEdit, QHeaderView, QMessageBox, QAbstractItemView,
-    QGraphicsDropShadowEffect, QFrame
+    QGraphicsDropShadowEffect, QFrame, QScrollArea
 )
 from PyQt5.QtCore import Qt, QDate, QEvent, QTimer
 from PyQt5.QtGui import QFont, QColor
@@ -68,7 +68,22 @@ class PDFSplitterGUI(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout()
+        # --- Main Scroll Area Wrapper for full page scrolling ---
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setFrameShape(QScrollArea.NoFrame)
+        main_scroll.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical { width: 10px; background: transparent; }
+            QScrollBar::handle:vertical { background: #334155; border-radius: 5px; min-height: 30px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        """)
+        
+        # Container widget for scroll area
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
+        
+        layout = QVBoxLayout(scroll_content)
         layout.setSpacing(14)
         layout.setContentsMargins(30, 20, 30, 20)
 
@@ -230,7 +245,12 @@ class PDFSplitterGUI(QWidget):
         self.split_btn.clicked.connect(self.split_pdf)
         layout.addWidget(self.split_btn)
 
-        self.setLayout(layout)
+        # Set scroll content and main layout
+        main_scroll.setWidget(scroll_content)
+        
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(main_scroll)
 
     def add_row_widgets(self, row_pos, start_val=1):
         self.table.insertRow(row_pos)

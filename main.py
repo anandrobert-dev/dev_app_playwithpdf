@@ -10,10 +10,10 @@ if _project_root not in sys.path:
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, 
     QStackedWidget, QTextEdit, QListWidget, QListWidgetItem, QFileDialog, QMessageBox,
-    QAbstractItemView, QScrollArea
+    QAbstractItemView, QScrollArea, QFrame
 )
 from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QFont, QIcon, QColor, QDragEnterEvent, QDropEvent, QTransform
+from PyQt5.QtGui import QFont, QIcon, QColor, QDragEnterEvent, QDropEvent, QTransform, QPainter
 
 # Import the Splitter from your GUI folder
 # NOTE: Ensure your folder has an empty __init__.py file inside 'gui' folder if this fails, 
@@ -22,6 +22,7 @@ from gui.splitter_gui import PDFSplitterGUI
 from gui.image_merger_gui import ImageMergerGUI
 from gui.image_splitter_gui import ImageSplitterGUI
 from gui.ocr_gui import OCRGUI
+from gui.pdf_to_office_gui import PDFToOfficeGUI
 
 
 # --- RESOURCE PATH HELPER FOR PYINSTALLER ---
@@ -118,6 +119,57 @@ class FlowLayout(QLayout):
             lineHeight = max(lineHeight, item.sizeHint().height())
 
         return y + lineHeight - rect.y()
+
+# --- ROTATING LABEL WIDGET ---
+from PyQt5.QtCore import QTimer
+from PyQt5.QtGui import QPixmap
+
+class RotatingLabel(QLabel):
+    """A QLabel that rotates its pixmap continuously."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.angle = 0
+        self.original_pixmap = None
+        self.rotation_speed = 1  # degrees per tick
+        self.clockwise = False  # False = anticlockwise
+        
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.rotate_step)
+    
+    def setPixmap(self, pixmap):
+        self.original_pixmap = pixmap
+        super().setPixmap(pixmap)
+    
+    def start_rotation(self, speed=1, clockwise=False):
+        """Start continuous rotation."""
+        self.rotation_speed = speed
+        self.clockwise = clockwise
+        self.timer.start(30)  # ~33 fps
+    
+    def stop_rotation(self):
+        self.timer.stop()
+    
+    def rotate_step(self):
+        if self.original_pixmap is None:
+            return
+        
+        # Update angle (anticlockwise = negative direction)
+        if self.clockwise:
+            self.angle = (self.angle + self.rotation_speed) % 360
+        else:
+            self.angle = (self.angle - self.rotation_speed) % 360
+        
+        # Apply rotation transform
+        transform = QTransform()
+        transform.translate(self.original_pixmap.width() / 2, self.original_pixmap.height() / 2)
+        transform.rotate(self.angle)
+        transform.translate(-self.original_pixmap.width() / 2, -self.original_pixmap.height() / 2)
+        
+        rotated = self.original_pixmap.transformed(transform, Qt.SmoothTransformation)
+        super().setPixmap(rotated)
+
+        rotated = self.original_pixmap.transformed(transform, Qt.SmoothTransformation)
+        super().setPixmap(rotated)
 
 # --- PAGE ITEM WIDGET ---
 from PyQt5.QtWidgets import QCheckBox, QToolButton
@@ -221,7 +273,22 @@ class MergerGUI(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout()
+        # --- Main Scroll Area Wrapper for full page scrolling ---
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setFrameShape(QScrollArea.NoFrame)
+        main_scroll.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical { width: 10px; background: transparent; }
+            QScrollBar::handle:vertical { background: #334155; border-radius: 5px; min-height: 30px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        """)
+        
+        # Container widget for scroll area
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
+        
+        layout = QVBoxLayout(scroll_content)
         layout.setSpacing(14)
         layout.setContentsMargins(30, 20, 30, 20)
         
@@ -376,7 +443,12 @@ class MergerGUI(QWidget):
         self.btn_merge.clicked.connect(self.perform_merge)
         layout.addWidget(self.btn_merge)
 
-        self.setLayout(layout)
+        # Set scroll content and main layout
+        main_scroll.setWidget(scroll_content)
+        
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(main_scroll)
 
     def add_files_dialog(self):
         downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
@@ -495,25 +567,40 @@ class WelcomeScreen(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
-        main_layout = QVBoxLayout()
+        # --- Main Scroll Area Wrapper for full page scrolling ---
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setFrameShape(QScrollArea.NoFrame)
+        main_scroll.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical { width: 10px; background: transparent; }
+            QScrollBar::handle:vertical { background: #334155; border-radius: 5px; min-height: 30px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        """)
+        
+        # Container widget for scroll area
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
+        
+        main_layout = QVBoxLayout(scroll_content)
         main_layout.setContentsMargins(50, 40, 50, 40)
         main_layout.setSpacing(20)
         
-        # --- Title (Centered, Fluorescent Orange) ---
+        # --- Title (Centered, Golden with Glow) ---
         title = QLabel("Oi360 Document SUITE")
         title.setFont(QFont("Georgia", 48, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("""
-            color: #FF6B00; 
+            color: #ffd700; 
             background: transparent;
             letter-spacing: 4px;
         """)
-        # Add glow effect
+        # Add golden glow effect
         from PyQt5.QtWidgets import QGraphicsDropShadowEffect
         glow = QGraphicsDropShadowEffect()
-        glow.setBlurRadius(25)
+        glow.setBlurRadius(30)
         glow.setOffset(0, 0)
-        glow.setColor(QColor(255, 107, 0, 200))  # Fluorescent Orange glow
+        glow.setColor(QColor(255, 215, 0, 220))  # Pure Golden glow
         title.setGraphicsEffect(glow)
         main_layout.addWidget(title)
         
@@ -521,24 +608,104 @@ class WelcomeScreen(QWidget):
         desc = QLabel("Welcome to your premium document management dashboard.\nSelect a tool below to begin.")
         desc.setFont(QFont("Segoe UI", 14))
         desc.setAlignment(Qt.AlignCenter)
-        desc.setStyleSheet("color: #a8b4d4; margin-bottom: 20px;")
+        desc.setStyleSheet("color: #a8b4d4; margin-bottom: 10px;")
         main_layout.addWidget(desc)
         
-        # --- Content Area: Logo + Buttons ---
-        content_layout = QHBoxLayout()
-        content_layout.setSpacing(40)
+        # --- Disclaimer Banner (Elegant & Professional) ---
+        disclaimer = QLabel("🎁 FREE FOR INTERNAL USE  •  Enhancing Productivity, Empowering Teams")
+        disclaimer.setFont(QFont("Segoe UI", 10))
+        disclaimer.setAlignment(Qt.AlignCenter)
+        disclaimer.setStyleSheet("""
+            color: #22d3ee;
+            background: rgba(6, 182, 212, 0.08);
+            border: 1px solid rgba(6, 182, 212, 0.3);
+            border-radius: 8px;
+            padding: 8px 20px;
+            margin: 5px 100px 15px 100px;
+        """)
+        main_layout.addWidget(disclaimer)
         
-        # --- LEFT PANEL: Logo (Big, Centered) ---
+        # --- Content Area: Left Buttons | Logo | Right Buttons ---
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(30)
+        
+        # Import help window
+        from gui.help_window import show_help
+        
+        # Store help windows to keep them alive
+        self.help_windows = []
+        
+        def open_help(tool_key):
+            window = show_help(tool_key, self)
+            self.help_windows.append(window)
+        
+        # Helper function to create button rows with help button
+        def create_button_row(main_btn, help_key):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.addWidget(main_btn)
+            
+            help_btn = QPushButton("📖")
+            help_btn.setFixedSize(45, 45)
+            help_btn.setCursor(Qt.PointingHandCursor)
+            help_btn.setToolTip("View Help / SOP")
+            help_btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(100, 116, 139, 0.6);
+                    color: white;
+                    border-radius: 10px;
+                    font-size: 18px;
+                }
+                QPushButton:hover {
+                    background: rgba(34, 211, 238, 0.8);
+                }
+            """)
+            help_btn.clicked.connect(lambda: open_help(help_key))
+            row.addWidget(help_btn)
+            return row
+        
+        # --- LEFT PANEL: PDF Tools (3 buttons) ---
         left_panel = QVBoxLayout()
+        left_panel.setSpacing(20)
         left_panel.setAlignment(Qt.AlignCenter)
+
+        btn_split = QPushButton("PDF SPLITTER")
+        btn_split.setFixedSize(220, 60)
+        btn_split.setCursor(Qt.PointingHandCursor)
+        btn_split.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        btn_split.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6366f1, stop:1 #8b5cf6); color: white; border-radius: 15px;")
+        btn_split.clicked.connect(lambda: self.switch_callback(1))
+
+        btn_merge = QPushButton("PDF MERGER")
+        btn_merge.setFixedSize(220, 60)
+        btn_merge.setCursor(Qt.PointingHandCursor)
+        btn_merge.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        btn_merge.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #059669); color: white; border-radius: 15px;")
+        btn_merge.clicked.connect(lambda: self.switch_callback(2))
+
+        btn_pdf_office = QPushButton("PDF to OFFICE")
+        btn_pdf_office.setFixedSize(220, 60)
+        btn_pdf_office.setCursor(Qt.PointingHandCursor)
+        btn_pdf_office.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        btn_pdf_office.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7c3aed, stop:1 #a855f7); color: white; border-radius: 15px;")
+        btn_pdf_office.clicked.connect(lambda: self.switch_callback(6))
+
+        left_panel.addLayout(create_button_row(btn_split, 'pdf_splitter'))
+        left_panel.addLayout(create_button_row(btn_merge, 'pdf_merger'))
+        left_panel.addLayout(create_button_row(btn_pdf_office, 'pdf_to_office'))
+        
+        content_layout.addLayout(left_panel, 30)
+        
+        # --- CENTER PANEL: Logo (Centered) ---
+        center_panel = QVBoxLayout()
+        center_panel.setAlignment(Qt.AlignCenter)
         
         from PyQt5.QtGui import QPixmap
-        # Use resource_path for PyInstaller compatibility
         logo_path = resource_path("oi360_logo.png")
         
         logo_label = QLabel()
         if os.path.exists(logo_path):
-            pixmap = QPixmap(logo_path).scaled(420, 380, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pixmap = QPixmap(logo_path).scaled(360, 320, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             logo_label.setPixmap(pixmap)
         else:
             logo_label.setText("Logo Not Found")
@@ -546,63 +713,56 @@ class WelcomeScreen(QWidget):
         logo_label.setAlignment(Qt.AlignCenter)
         logo_label.setStyleSheet("background: transparent;")
 
-        left_panel.addWidget(logo_label)
-        content_layout.addLayout(left_panel, 55)
+        center_panel.addWidget(logo_label)
+        content_layout.addLayout(center_panel, 40)
         
-        # Right: Buttons (moved more to the right)
+        # --- RIGHT PANEL: Other Tools (3 buttons) ---
         right_panel = QVBoxLayout()
-        right_panel.setSpacing(25)
-        right_panel.setAlignment(Qt.AlignCenter | Qt.AlignRight)
+        right_panel.setSpacing(20)
+        right_panel.setAlignment(Qt.AlignCenter)
 
-        btn_split = QPushButton("PDF SPLITTER")
-        btn_split.setFixedSize(280, 70)
-        btn_split.setCursor(Qt.PointingHandCursor)
-        btn_split.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        btn_split.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6366f1, stop:1 #8b5cf6); color: white; border-radius: 15px;")
-        btn_split.clicked.connect(lambda: self.switch_callback(1))
-
-        btn_merge = QPushButton("PDF MERGER")
-        btn_merge.setFixedSize(280, 70)
-        btn_merge.setCursor(Qt.PointingHandCursor)
-        btn_merge.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        btn_merge.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #059669); color: white; border-radius: 15px;")
-        btn_merge.clicked.connect(lambda: self.switch_callback(2))
-
-        right_panel.addWidget(btn_split)
-        right_panel.addWidget(btn_merge)
-
-        # --- Image Module Buttons ---
         btn_img_split = QPushButton("TIFF SPLITTER")
-        btn_img_split.setFixedSize(280, 70)
+        btn_img_split.setFixedSize(220, 60)
         btn_img_split.setCursor(Qt.PointingHandCursor)
-        btn_img_split.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        btn_img_split.setFont(QFont("Segoe UI", 12, QFont.Bold))
         btn_img_split.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #06b6d4, stop:1 #0891b2); color: white; border-radius: 15px;")
         btn_img_split.clicked.connect(lambda: self.switch_callback(3))
 
         btn_img_merge = QPushButton("IMAGE → PDF")
-        btn_img_merge.setFixedSize(280, 70)
+        btn_img_merge.setFixedSize(220, 60)
         btn_img_merge.setCursor(Qt.PointingHandCursor)
-        btn_img_merge.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        btn_img_merge.setFont(QFont("Segoe UI", 12, QFont.Bold))
         btn_img_merge.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ec4899, stop:1 #db2777); color: white; border-radius: 15px;")
         btn_img_merge.clicked.connect(lambda: self.switch_callback(4))
 
-        # --- OCR Engine Button ---
         btn_ocr = QPushButton("OCR ENGINE")
-        btn_ocr.setFixedSize(280, 70)
+        btn_ocr.setFixedSize(220, 60)
         btn_ocr.setCursor(Qt.PointingHandCursor)
-        btn_ocr.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        btn_ocr.setFont(QFont("Segoe UI", 12, QFont.Bold))
         btn_ocr.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF6B00, stop:1 #FF9500); color: white; border-radius: 15px;")
         btn_ocr.clicked.connect(lambda: self.switch_callback(5))
 
-        right_panel.addWidget(btn_img_split)
-        right_panel.addWidget(btn_img_merge)
-        right_panel.addWidget(btn_ocr)
+        right_panel.addLayout(create_button_row(btn_img_split, 'tiff_splitter'))
+        right_panel.addLayout(create_button_row(btn_img_merge, 'image_to_pdf'))
+        right_panel.addLayout(create_button_row(btn_ocr, 'ocr_engine'))
         
-        content_layout.addLayout(right_panel, 45)
+        content_layout.addLayout(right_panel, 30)
         
         main_layout.addLayout(content_layout)
         main_layout.addStretch()
-        self.setLayout(main_layout)
+        
+        # Copyright footer
+        copyright_label = QLabel("© 2026 Koinonia Technologies. All rights reserved.\nProprietary Software | Independent Development")
+        copyright_label.setAlignment(Qt.AlignCenter)
+        copyright_label.setStyleSheet("color: #64748b; font-size: 11px; padding: 10px;")
+        main_layout.addWidget(copyright_label)
+        
+        # Set scroll content and main layout
+        main_scroll.setWidget(scroll_content)
+        
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(main_scroll)
 
 class MainApp(QMainWindow):
     def __init__(self):
@@ -626,6 +786,7 @@ class MainApp(QMainWindow):
         self.page_img_splitter = ImageSplitterGUI(go_back_callback=self.go_home)
         self.page_img_merger = ImageMergerGUI(go_back_callback=self.go_home)
         self.page_ocr = OCRGUI(go_back_callback=self.go_home)
+        self.page_pdf_office = PDFToOfficeGUI(go_back_callback=self.go_home)
 
         self.stack.addWidget(self.page_welcome)      # Index 0
         self.stack.addWidget(self.page_splitter)     # Index 1
@@ -633,6 +794,7 @@ class MainApp(QMainWindow):
         self.stack.addWidget(self.page_img_splitter) # Index 3
         self.stack.addWidget(self.page_img_merger)   # Index 4
         self.stack.addWidget(self.page_ocr)          # Index 5
+        self.stack.addWidget(self.page_pdf_office)   # Index 6
 
     def switch_to_page(self, index):
         self.stack.setCurrentIndex(index)

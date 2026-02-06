@@ -196,7 +196,22 @@ class ImageMergerGUI(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout()
+        # --- Main Scroll Area Wrapper for full page scrolling ---
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setFrameShape(QScrollArea.NoFrame)
+        main_scroll.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical { width: 10px; background: transparent; }
+            QScrollBar::handle:vertical { background: #334155; border-radius: 5px; min-height: 30px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        """)
+        
+        # Container widget for scroll area
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
+        
+        layout = QVBoxLayout(scroll_content)
         layout.setSpacing(14)
         layout.setContentsMargins(30, 20, 30, 20)
         
@@ -365,7 +380,12 @@ class ImageMergerGUI(QWidget):
         self.btn_merge.clicked.connect(self.perform_merge)
         layout.addWidget(self.btn_merge)
 
-        self.setLayout(layout)
+        # Set scroll content and main layout
+        main_scroll.setWidget(scroll_content)
+        
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(main_scroll)
 
     def add_files_dialog(self):
         downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")

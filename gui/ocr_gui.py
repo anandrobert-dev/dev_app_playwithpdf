@@ -13,6 +13,9 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt5.QtGui import QFont, QColor, QTextCharFormat, QTextCursor, QPixmap, QImage
 
+# Import shared components
+from gui.ui_components import SelectablePreviewLabel
+
 # --- PyInstaller Path Fix ---
 if getattr(sys, 'frozen', False):
     bundle_dir = sys._MEIPASS
@@ -22,7 +25,7 @@ if getattr(sys, 'frozen', False):
 
 class OCRWorker(QThread):
     """Background thread for OCR processing to keep UI responsive."""
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(str, float)  # text, accuracy/confidence
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
     
@@ -37,6 +40,7 @@ class OCRWorker(QThread):
             from PIL import Image
             
             file_ext = os.path.splitext(self.file_path)[1].lower()
+            all_confidences = []  # Track confidence scores
             
             # Handle PDF files
             if file_ext == '.pdf':
@@ -48,10 +52,18 @@ class OCRWorker(QThread):
                     all_text = []
                     for i, page in enumerate(pages):
                         self.progress.emit(f"Processing page {i+1} of {len(pages)}...")
+                        # Get text with confidence data
+                        data = pytesseract.image_to_data(page, lang=self.language, output_type=pytesseract.Output.DICT)
                         text = pytesseract.image_to_string(page, lang=self.language)
                         all_text.append(f"--- Page {i+1} ---\n{text}")
+                        
+                        # Extract confidence scores (filter out -1 which means no confidence)
+                        conf_scores = [int(c) for c in data['conf'] if int(c) > 0]
+                        if conf_scores:
+                            all_confidences.extend(conf_scores)
                     
-                    self.finished.emit("\n\n".join(all_text))
+                    avg_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0
+                    self.finished.emit("\n\n".join(all_text), avg_confidence)
                 except ImportError:
                     self.error.emit("pdf2image library not found. Please install: pip install pdf2image")
                     return
@@ -81,23 +93,151 @@ class OCRWorker(QThread):
                             if frame.mode in ('RGBA', 'P', 'LA'):
                                 frame = frame.convert('RGB')
                             
+                            # Get text with confidence
+                            data = pytesseract.image_to_data(frame, lang=self.language, output_type=pytesseract.Output.DICT)
                             text = pytesseract.image_to_string(frame, lang=self.language)
                             all_text.append(f"--- Page {page_num + 1} ---\n{text}")
+                            
+                            conf_scores = [int(c) for c in data['conf'] if int(c) > 0]
+                            if conf_scores:
+                                all_confidences.extend(conf_scores)
                             page_num += 1
                     except EOFError:
                         pass  # End of pages
                     
+                    avg_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0
                     if all_text:
-                        self.finished.emit("\n\n".join(all_text))
+                        self.finished.emit("\n\n".join(all_text), avg_confidence)
                     else:
-                        self.finished.emit("No text could be extracted from the image.")
+                        self.finished.emit("No text could be extracted from the image.", 0)
                 else:
-                    # Single image
+                    # Single image - get confidence data
+                    data = pytesseract.image_to_data(img, lang=self.language, output_type=pytesseract.Output.DICT)
                     text = pytesseract.image_to_string(img, lang=self.language)
-                    self.finished.emit(text if text.strip() else "No text could be extracted from the image.")
+                    
+                    conf_scores = [int(c) for c in data['conf'] if int(c) > 0]
+                    avg_confidence = sum(conf_scores) / len(conf_scores) if conf_scores else 0
+                    
+                    self.finished.emit(text if text.strip() else "No text could be extracted from the image.", avg_confidence)
         
         except Exception as e:
             self.error.emit(str(e))
+
+
+class TranslationWorker(QThread):
+    """Background thread for hybrid translation (offline-first, online-fallback)."""
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+    
+    # Language name to code mapping
+    LANG_CODES = {
+        'english': 'en',
+        'german': 'de',
+        'french': 'fr',
+        'spanish': 'es',
+        'italian': 'it',
+        'portuguese': 'pt',
+        'dutch': 'nl',
+        'russian': 'ru',
+        'chinese (simplified)': 'zh',
+        'japanese': 'ja',
+        'korean': 'ko',
+        'arabic': 'ar',
+        'hindi': 'hi',
+        'gujarati': 'gu',
+    }
+    
+    def __init__(self, text, target_lang='english', source_lang='hindi'):
+        super().__init__()
+        self.text = text
+        self.target_lang_name = target_lang.lower()
+        self.source_lang_name = source_lang.lower()
+        self.target_lang = self.LANG_CODES.get(self.target_lang_name, target_lang)
+        self.source_lang = self.LANG_CODES.get(self.source_lang_name, source_lang)
+    
+    def try_offline_translation(self):
+        """Attempt translation using Argos Translate (offline)."""
+        import argostranslate.package
+        import argostranslate.translate
+        
+        installed_languages = argostranslate.translate.get_installed_languages()
+        source_lang_obj = None
+        target_lang_obj = None
+        
+        for lang in installed_languages:
+            if lang.code == self.source_lang:
+                source_lang_obj = lang
+            if lang.code == self.target_lang:
+                target_lang_obj = lang
+        
+        if source_lang_obj and target_lang_obj:
+            translation = source_lang_obj.get_translation(target_lang_obj)
+            if translation:
+                return translation.translate(self.text)
+        
+        return None  # Offline translation not available
+    
+    def try_online_translation(self):
+        """Attempt translation using Google Translate (online)."""
+        from deep_translator import GoogleTranslator
+        import time
+        
+        max_chars = 4500
+        max_retries = 3
+        
+        def translate_with_retry(text_chunk, retries=max_retries):
+            for attempt in range(retries):
+                try:
+                    return GoogleTranslator(source=self.source_lang_name, target=self.target_lang_name).translate(text_chunk)
+                except Exception as e:
+                    if attempt < retries - 1:
+                        time.sleep(1 * (attempt + 1))
+                    else:
+                        raise e
+        
+        if len(self.text) > max_chars:
+            chunks = [self.text[i:i + max_chars] for i in range(0, len(self.text), max_chars)]
+            translated_chunks = []
+            for chunk in chunks:
+                translated = translate_with_retry(chunk)
+                translated_chunks.append(translated if translated else "")
+            return "".join(translated_chunks)
+        else:
+            return translate_with_retry(self.text)
+    
+    def run(self):
+        try:
+            # Step 1: Try offline translation first
+            self.progress.emit("Trying offline translation...")
+            try:
+                result = self.try_offline_translation()
+                if result:
+                    self.finished.emit(result)
+                    return
+            except Exception:
+                pass  # Offline failed, try online
+            
+            # Step 2: Fallback to online translation
+            self.progress.emit("Offline model not available. Trying online translation...")
+            try:
+                result = self.try_online_translation()
+                if result:
+                    self.finished.emit(result)
+                    return
+                else:
+                    self.error.emit("Translation returned empty.")
+            except Exception as online_err:
+                self.error.emit(
+                    f"Translation failed.\n\n"
+                    f"Offline: Model not available for {self.source_lang} → {self.target_lang}\n"
+                    f"Online: {str(online_err)}\n\n"
+                    f"Check your internet connection or use Hindi ↔ English (offline supported)."
+                )
+                
+        except Exception as e:
+            self.error.emit(f"Translation failed: {str(e)}")
+
 
 
 class ExternalPreviewWindow(QWidget):
@@ -197,6 +337,7 @@ class OCRGUI(QWidget):
         'Korean': 'kor',
         'Arabic': 'ara',
         'Hindi': 'hin',
+        'Gujarati': 'guj',
     }
     
     def __init__(self, go_back_callback=None):
@@ -210,10 +351,26 @@ class OCRGUI(QWidget):
         self.preview_image = None
         self._preview_data = None
         self.external_window = None
+        self.selection_rect = None  # (x, y, w, h) in original image coords
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout()
+        # --- Main Scroll Area Wrapper for full page scrolling ---
+        main_scroll = QScrollArea()
+        main_scroll.setWidgetResizable(True)
+        main_scroll.setFrameShape(QScrollArea.NoFrame)
+        main_scroll.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical { width: 10px; background: transparent; }
+            QScrollBar::handle:vertical { background: #334155; border-radius: 5px; min-height: 30px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+        """)
+        
+        # Container widget for scroll area
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background: transparent;")
+        
+        layout = QVBoxLayout(scroll_content)
         layout.setSpacing(14)
         layout.setContentsMargins(30, 20, 30, 20)
         
@@ -316,9 +473,11 @@ class OCRGUI(QWidget):
         self.btn_zoom_in = QPushButton("+")
         self.btn_zoom_fit = QPushButton("RESET")
         self.btn_detach = QPushButton("🌐 DETACH")
+        self.btn_select_region = QPushButton("✂️ SELECT")
+        self.btn_clear_selection = QPushButton("✖️ CLEAR")
         
-        for btn in [self.btn_zoom_out, self.btn_zoom_in, self.btn_zoom_fit, self.btn_detach]:
-            btn.setFixedSize(80 if btn in [self.btn_zoom_fit, self.btn_detach] else 35, 28)
+        for btn in [self.btn_zoom_out, self.btn_zoom_in, self.btn_zoom_fit, self.btn_detach, self.btn_select_region, self.btn_clear_selection]:
+            btn.setFixedSize(80 if btn in [self.btn_zoom_fit, self.btn_detach, self.btn_select_region, self.btn_clear_selection] else 35, 28)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet("""
                 QPushButton {
@@ -326,19 +485,27 @@ class OCRGUI(QWidget):
                 }
                 QPushButton:hover { background: #4b5563; }
                 QPushButton:disabled { color: #555; }
+                QPushButton:checked { background: #06b6d4; color: #0f172a; }
             """)
         
         self.btn_detach.setStyleSheet(self.btn_detach.styleSheet().replace("#374151", "#6366f1"))
+        self.btn_select_region.setCheckable(True)
+        self.btn_select_region.setStyleSheet(self.btn_select_region.styleSheet().replace("#374151", "#10b981"))
+        self.btn_clear_selection.setStyleSheet(self.btn_clear_selection.styleSheet().replace("#374151", "#ef4444"))
         
         self.btn_zoom_out.clicked.connect(lambda: self.adjust_zoom(0.8))
         self.btn_zoom_in.clicked.connect(lambda: self.adjust_zoom(1.2))
         self.btn_zoom_fit.clicked.connect(self.reset_zoom)
         self.btn_detach.clicked.connect(self.detach_preview)
+        self.btn_select_region.clicked.connect(self.toggle_selection_mode)
+        self.btn_clear_selection.clicked.connect(self.clear_selection)
         
         preview_header.addWidget(self.btn_zoom_out)
         preview_header.addWidget(self.btn_zoom_in)
         preview_header.addWidget(self.btn_zoom_fit)
         preview_header.addWidget(self.btn_detach)
+        preview_header.addWidget(self.btn_select_region)
+        preview_header.addWidget(self.btn_clear_selection)
         
         preview_group.addLayout(preview_header)
         
@@ -352,9 +519,11 @@ class OCRGUI(QWidget):
             }
         """)
         
-        self.preview_label = QLabel("No Image Loaded")
+        self.preview_label = SelectablePreviewLabel()
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setStyleSheet("color: #475569; background: transparent;")
+        self.preview_label.setText("No Image Loaded")
+        self.preview_label.selection_changed.connect(self.on_selection_changed)
         self.scroll_area.setWidget(self.preview_label)
         
         preview_group.addWidget(self.scroll_area)
@@ -404,6 +573,42 @@ class OCRGUI(QWidget):
         options_row.addWidget(self.btn_extract)
         
         layout.addLayout(options_row)
+
+        # --- Translation Row (NEW) ---
+        translation_row = QHBoxLayout()
+        translation_row.setSpacing(15)
+        translation_row.setContentsMargins(0, 0, 0, 10)
+        
+        trans_label = QLabel("Translate To:")
+        trans_label.setStyleSheet("color: #a8b4d4; font-size: 12px; font-weight: bold;")
+        translation_row.addWidget(trans_label)
+        
+        self.target_lang_combo = QComboBox()
+        self.target_lang_combo.addItems(self.LANGUAGES.keys())
+        self.target_lang_combo.setCurrentText("English")
+        self.target_lang_combo.setFixedSize(160, 40)
+        self.target_lang_combo.setStyleSheet(self.lang_combo.styleSheet())
+        translation_row.addWidget(self.target_lang_combo)
+        
+        translation_row.addStretch()
+        
+        self.btn_translate = QPushButton("🌐 TRANSLATE TEXT")
+        self.btn_translate.setFixedSize(200, 50)
+        self.btn_translate.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        self.btn_translate.setCursor(Qt.PointingHandCursor)
+        self.btn_translate.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6366f1, stop:1 #8b5cf6);
+                color: white; font-weight: bold; border-radius: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+            QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #818cf8, stop:1 #a78bfa); }
+            QPushButton:disabled { background: #4b5563; color: #9ca3af; }
+        """)
+        self.btn_translate.clicked.connect(self.translate_text)
+        translation_row.addWidget(self.btn_translate)
+        
+        layout.addLayout(translation_row)
         
         # --- Progress Bar ---
         self.progress_bar = QProgressBar()
@@ -434,7 +639,9 @@ class OCRGUI(QWidget):
         self.text_area.setStyleSheet("""
             QTextEdit {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(30, 41, 59, 0.95), stop:1 rgba(15, 23, 42, 0.98));
-                color: #e2e8f0; font-size: 13px; font-family: 'Consolas', 'Courier New', monospace;
+                color: #e2e8f0; 
+                font-size: 15px; 
+                font-family: 'Consolas', 'Lohit Devanagari', 'Lohit Gujarati', 'Noto Sans Devanagari', 'Noto Sans Gujarati', 'Courier New', monospace;
                 border: 1px solid #475569; border-radius: 12px; padding: 12px;
             }
         """)
@@ -552,7 +759,42 @@ class OCRGUI(QWidget):
         btn_row.addWidget(btn_clear)
         layout.addLayout(btn_row)
 
-        self.setLayout(layout)
+        # --- OCR Accuracy Panel ---
+        self.accuracy_panel = QFrame()
+        self.accuracy_panel.setVisible(False)
+        self.accuracy_panel.setStyleSheet("""
+            QFrame {
+                background: rgba(30, 41, 59, 0.7);
+                border: 1px solid #475569;
+                border-radius: 10px;
+            }
+        """)
+        acc_layout = QHBoxLayout(self.accuracy_panel)
+        acc_layout.setContentsMargins(15, 10, 15, 10)
+        acc_layout.setSpacing(15)
+        
+        acc_title = QLabel("OCR CONFIDENCE:")
+        acc_title.setStyleSheet("color: #94a3b8; font-weight: bold; font-size: 12px; background: transparent; border: none;")
+        acc_layout.addWidget(acc_title)
+        
+        self.ocr_accuracy_value = QLabel("0%")
+        self.ocr_accuracy_value.setFont(QFont("Segoe UI", 18, QFont.Bold))
+        self.ocr_accuracy_value.setStyleSheet("color: #10b981; background: transparent; border: none;")
+        acc_layout.addWidget(self.ocr_accuracy_value)
+        
+        self.ocr_accuracy_indicator = QLabel("")
+        self.ocr_accuracy_indicator.setStyleSheet("color: #10b981; font-size: 11px; background: transparent; border: none;")
+        acc_layout.addWidget(self.ocr_accuracy_indicator)
+        
+        acc_layout.addStretch()
+        layout.addWidget(self.accuracy_panel)
+
+        # Set scroll content and main layout
+        main_scroll.setWidget(scroll_content)
+        
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(main_scroll)
 
     def browse_file(self):
         # Default to Downloads folder
@@ -646,6 +888,7 @@ class OCRGUI(QWidget):
             new_height = int(self.base_pixmap.height() * self.zoom_factor)
             scaled = self.base_pixmap.scaled(new_width, new_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.preview_label.setPixmap(scaled)
+            self.preview_label.zoom_factor = self.zoom_factor  # Sync zoom for selection coords
             self.zoom_label.setText(f"{int(self.zoom_factor * 100)}%")
             
             # Sync with external window if open
@@ -664,6 +907,32 @@ class OCRGUI(QWidget):
         self.external_window.set_pixmap(self.base_pixmap, self.zoom_factor)
         self.external_window.show()
         self.external_window.raise_()
+
+    def toggle_selection_mode(self):
+        """Toggle selection mode on/off."""
+        enabled = self.btn_select_region.isChecked()
+        self.preview_label.set_selection_mode(enabled)
+        if enabled:
+            self.status_label.setText("Selection mode: Draw a rectangle on the preview")
+        else:
+            self.status_label.setText("Selection mode disabled")
+    
+    def clear_selection(self):
+        """Clear the current selection."""
+        self.selection_rect = None
+        self.preview_label.clear_selection()
+        self.btn_select_region.setChecked(False)
+        self.preview_label.set_selection_mode(False)
+        self.status_label.setText("Selection cleared")
+    
+    def on_selection_changed(self, rect):
+        """Handle selection changes from the preview label."""
+        self.selection_rect = rect
+        if rect:
+            x, y, w, h = rect
+            self.status_label.setText(f"Selected region: {w}x{h} pixels at ({x}, {y})")
+        else:
+            self.status_label.setText("")
 
     def extract_text(self):
         if not self.current_file:
@@ -684,18 +953,58 @@ class OCRGUI(QWidget):
         self.status_label.setText("Starting OCR...")
         self.text_area.clear()
         
+        # Check if we need to crop to selection
+        file_to_ocr = self.current_file
+        if self.selection_rect and self.preview_image:
+            try:
+                from PIL import Image
+                import tempfile
+                
+                x, y, w, h = self.selection_rect
+                
+                # Crop the preview image
+                cropped = self.preview_image.crop((x, y, x + w, y + h))
+                
+                # Save to temp file
+                temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                cropped.save(temp_file.name)
+                file_to_ocr = temp_file.name
+                self.status_label.setText("OCR on selected region...")
+            except Exception as e:
+                QMessageBox.warning(self, "Warning", f"Failed to crop selection: {str(e)}")
+                self.progress_bar.setVisible(False)
+                self.btn_extract.setEnabled(True)
+                return
+        
         # Run OCR in background thread
-        self.ocr_worker = OCRWorker(self.current_file, lang_code)
+        self.ocr_worker = OCRWorker(file_to_ocr, lang_code)
         self.ocr_worker.finished.connect(self.on_ocr_finished)
         self.ocr_worker.error.connect(self.on_ocr_error)
         self.ocr_worker.progress.connect(self.on_ocr_progress)
         self.ocr_worker.start()
 
-    def on_ocr_finished(self, text):
+    def on_ocr_finished(self, text, confidence):
         self.progress_bar.setVisible(False)
         self.btn_extract.setEnabled(True)
         self.status_label.setText("✅ Extraction complete!")
         self.text_area.setText(text)
+        
+        # Display accuracy/confidence
+        self.ocr_accuracy_value.setText(f"{confidence:.1f}%")
+        if confidence >= 80:
+            self.ocr_accuracy_value.setStyleSheet("color: #10b981; background: transparent; border: none; font-size: 18px;")
+            self.ocr_accuracy_indicator.setText("🟢 HIGH - Reliable for use")
+            self.ocr_accuracy_indicator.setStyleSheet("color: #10b981; font-size: 11px; background: transparent; border: none;")
+        elif confidence >= 50:
+            self.ocr_accuracy_value.setStyleSheet("color: #f59e0b; background: transparent; border: none; font-size: 18px;")
+            self.ocr_accuracy_indicator.setText("🟡 MODERATE - Review recommended")
+            self.ocr_accuracy_indicator.setStyleSheet("color: #f59e0b; font-size: 11px; background: transparent; border: none;")
+        else:
+            self.ocr_accuracy_value.setStyleSheet("color: #ef4444; background: transparent; border: none; font-size: 18px;")
+            self.ocr_accuracy_indicator.setText("🔴 LOW - Manual verification needed")
+            self.ocr_accuracy_indicator.setStyleSheet("color: #ef4444; font-size: 11px; background: transparent; border: none;")
+        
+        self.accuracy_panel.setVisible(True)
 
     def on_ocr_error(self, error_msg):
         self.progress_bar.setVisible(False)
@@ -724,6 +1033,42 @@ class OCRGUI(QWidget):
 
     def on_ocr_progress(self, message):
         self.status_label.setText(message)
+
+    def translate_text(self):
+        """Translate the currently extracted text."""
+        text = self.text_area.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "Warning", "No text to translate. Please extract text first.")
+            return
+            
+        target_lang_name = self.target_lang_combo.currentText().lower()
+        source_lang_name = self.lang_combo.currentText().lower()
+        
+        self.btn_translate.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.status_label.setText(f"Translating to {target_lang_name.capitalize()}...")
+        
+        # Use language names for deep-translator as they are more reliable than mapping 3-char codes
+        self.trans_worker = TranslationWorker(text, target_lang_name, source_lang_name)
+        self.trans_worker.finished.connect(self.on_translation_finished)
+        self.trans_worker.error.connect(self.on_translation_error)
+        self.trans_worker.start()
+
+    def on_translation_finished(self, translated_text):
+        self.btn_translate.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("✅ Translation complete!")
+        
+        # Append translation instead of replacing? Or replace? 
+        # User said "translate and export", usually implies replacing or adding.
+        # Let's show it in the text area.
+        self.text_area.setText(translated_text)
+
+    def on_translation_error(self, error_msg):
+        self.btn_translate.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("❌ Translation failed")
+        QMessageBox.critical(self, "Translation Error", f"Failed to translate text:\n{error_msg}")
 
     def copy_to_clipboard(self):
         text = self.text_area.toPlainText()
