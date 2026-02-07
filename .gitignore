@@ -1,8 +1,27 @@
+# Python
 __pycache__/
-.venv/
-_env/
-.env
-*.log
-*.sqlite3
-*.db
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env/
+.env*/
+
+# Build artifacts
+build/
+dist/
+logs/
+
+# Packaging
+*.spec
+
+# OS / Editor
 .vscode/
+.idea/
+.DS_Store
+
+# Misc
+*.log
+
